@@ -1,0 +1,13 @@
+{
+  "mcp": {
+    "servers": {
+      "dart": {
+        "type": "local",
+        "command": [
+          "dart",
+          "mcp-server"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Leanback launcher banner placeholder (320x180).
+     Replace with a real PNG banner for store submission. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#111417" />
+    <corners android:radius="8dp" />
+</shape>
