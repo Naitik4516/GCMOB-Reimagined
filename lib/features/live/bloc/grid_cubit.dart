@@ -8,12 +8,20 @@ import '../../profiles/data/profile_store.dart';
 /// * [order] — user-arranged display order (persisted per profile).
 /// * [sunk] — channels that failed this session, shown after all working
 ///   tiles, in order of failure. Session-only, never persisted.
+/// * [spotlight] — a double-clicked/OK tile is shown alone (1x1, HD);
+///   [returnSize]/[returnPage] restore the previous layout on exit.
+/// * [singleHd] — 1x1 tiles play the HD main-stream (audio on); off to
+///   force SD.
 class GridState extends Equatable {
   final int gridSize;
   final int page;
   final int channelCount;
   final List<int> order;
   final List<int> sunk;
+  final bool spotlight;
+  final int returnSize;
+  final int returnPage;
+  final bool singleHd;
 
   const GridState({
     this.gridSize = 4,
@@ -21,6 +29,10 @@ class GridState extends Equatable {
     required this.channelCount,
     required this.order,
     this.sunk = const [],
+    this.spotlight = false,
+    this.returnSize = 4,
+    this.returnPage = 0,
+    this.singleHd = true,
   });
 
   /// Working tiles first (in user order), failed tiles last.
@@ -53,6 +65,10 @@ class GridState extends Equatable {
     int? channelCount,
     List<int>? order,
     List<int>? sunk,
+    bool? spotlight,
+    int? returnSize,
+    int? returnPage,
+    bool? singleHd,
   }) =>
       GridState(
         gridSize: gridSize ?? this.gridSize,
@@ -60,10 +76,24 @@ class GridState extends Equatable {
         channelCount: channelCount ?? this.channelCount,
         order: order ?? this.order,
         sunk: sunk ?? this.sunk,
+        spotlight: spotlight ?? this.spotlight,
+        returnSize: returnSize ?? this.returnSize,
+        returnPage: returnPage ?? this.returnPage,
+        singleHd: singleHd ?? this.singleHd,
       );
 
   @override
-  List<Object?> get props => [gridSize, page, channelCount, order, sunk];
+  List<Object?> get props => [
+        gridSize,
+        page,
+        channelCount,
+        order,
+        sunk,
+        spotlight,
+        returnSize,
+        returnPage,
+        singleHd,
+      ];
 }
 
 class GridCubit extends Cubit<GridState> {
@@ -99,7 +129,42 @@ class GridCubit extends Cubit<GridState> {
 
   void setGridSize(int size) {
     assert(size == 1 || size == 4 || size == 9);
-    emit(state.copyWith(gridSize: size, page: 0));
+    // An explicit layout pick always leaves spotlight mode.
+    emit(state.copyWith(gridSize: size, page: 0, spotlight: false));
+  }
+
+  /// Double-click / OK on a tile: show it alone (1x1), remembering the
+  /// layout + page to restore on exit.
+  void focusChannel(int channel) {
+    if (isClosed) return;
+    final idx = state.effectiveOrder.indexOf(channel);
+    if (idx < 0) return;
+    emit(state.copyWith(
+      gridSize: 1,
+      page: idx,
+      spotlight: true,
+      returnSize: state.spotlight ? state.returnSize : state.gridSize,
+      returnPage: state.spotlight ? state.returnPage : state.page,
+    ));
+  }
+
+  /// Leave the single-camera view, restoring the previous layout + page.
+  void unfocus() {
+    if (isClosed || !state.spotlight) return;
+    final pages = state.channelCount <= state.returnSize
+        ? 1
+        : (state.channelCount / state.returnSize).ceil();
+    emit(state.copyWith(
+      gridSize: state.returnSize,
+      page: state.returnPage.clamp(0, pages - 1),
+      spotlight: false,
+    ));
+  }
+
+  /// 1x1 tiles play HD by default; off forces the SD sub-stream.
+  void setSingleHd(bool hd) {
+    if (isClosed || state.singleHd == hd) return;
+    emit(state.copyWith(singleHd: hd));
   }
 
   void nextPage() {

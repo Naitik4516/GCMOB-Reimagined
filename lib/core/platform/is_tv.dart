@@ -11,3 +11,10 @@ bool get isTvCapable => defaultTargetPlatform == TargetPlatform.android;
 bool get isDesktopDevice =>
     defaultTargetPlatform == TargetPlatform.linux ||
     defaultTargetPlatform == TargetPlatform.windows;
+
+/// Custom window chrome (hidden native bar + drawn title bar + rounded
+/// content clip) is Windows-only. On Linux the native KWin/GTK frame
+/// stays: it carries the theme rounding/shadow like every other app, and
+/// Flutter transparent windows don't composite on Wayland anyway.
+bool get useCustomChrome =>
+    defaultTargetPlatform == TargetPlatform.windows;

@@ -4,6 +4,10 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../live/ui/live_page.dart';
 import '../bloc/profiles_cubit.dart';
 import '../data/profile_store.dart';
+import '../models/dvr_profile.dart';
+import '../../../app/adaptive_shell.dart';
+import '../../../app/routes.dart';
+import '../../../app/theme.dart';
 import 'profile_form_page.dart';
 
 /// Entry screen: list of DVR profiles. First item autofocused for TV D-Pad.
@@ -17,83 +21,150 @@ class ProfileListPage extends StatefulWidget {
 class _ProfileListPageState extends State<ProfileListPage> {
   final _store = ProfileStore();
 
-  @override
-  Widget build(BuildContext context) {
-    return BlocProvider(
-      create: (_) => ProfilesCubit(_store)..load(),
-      child: Scaffold(
-        appBar: AppBar(title: const Text('CCTV — DVR Profiles')),
-        body: BlocBuilder<ProfilesCubit, ProfilesState>(
-          builder: (context, state) {
-            if (state.status == ProfilesStatus.loading) {
-              return const Center(child: CircularProgressIndicator());
-            }
-            if (state.status == ProfilesStatus.error) {
-              return Center(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text('Failed to load: ${state.error}'),
-                    ElevatedButton(
-                      onPressed: () => context.read<ProfilesCubit>().load(),
-                      child: const Text('Retry'),
+  Future<void> _openProfile(DvrProfile p) async {
+    final pass = await _store.loadPassword(p.id);
+    if (!mounted) return;
+    if (pass == null || pass.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('No password stored — edit profile to re-enter.')),
+      );
+      return;
+    }
+    await _store.saveLastProfile(p.id);
+    if (!mounted) return;
+    Navigator.of(context).push(
+      CctvPageRoute(
+        builder: (_) => LivePage(profile: p, password: pass),
+      ),
+    );
+  }
+
+  void _showActions(DvrProfile p) {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.play_circle_outline),
+              title: const Text('Open live view'),
+              autofocus: true,
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                _openProfile(p);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.edit_outlined),
+              title: const Text('Edit'),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                Navigator.of(context).push(
+                  CctvPageRoute(
+                    builder: (_) => BlocProvider.value(
+                      value: context.read<ProfilesCubit>(),
+                      child: ProfileFormPage(existing: p),
                     ),
-                  ],
-                ),
-              );
-            }
-            if (state.profiles.isEmpty) {
-              return const Center(
-                child: Text(
-                  'No DVR configured.\nAdd one with the + button.',
-                  textAlign: TextAlign.center,
-                ),
-              );
-            }
-            return ListView.builder(
-              itemCount: state.profiles.length,
-              itemBuilder: (context, i) {
-                final p = state.profiles[i];
-                return ListTile(
-                  autofocus: i == 0,
-                  leading: const Icon(Icons.dns),
-                  title: Text(p.name),
-                  subtitle: Text(
-                      '${p.host}:${p.rtspPort} • ${p.username} • ${p.channelCount}ch'),
-                  trailing: IconButton(
-                    icon: const Icon(Icons.delete_outline),
-                    onPressed: () =>
-                        context.read<ProfilesCubit>().remove(p.id),
                   ),
-                  onTap: () async {
-                    final pass = await _store.loadPassword(p.id);
-                    if (!context.mounted) return;
-                    if (pass == null || pass.isEmpty) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                            content: Text(
-                                'No password stored — edit profile to re-enter.')),
-                      );
-                      return;
-                    }
-                    await _store.saveLastProfile(p.id);
-                    if (!context.mounted) return;
-                    Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => LivePage(profile: p, password: pass),
-                      ),
-                    );
-                  },
                 );
               },
+            ),
+            ListTile(
+              leading: Icon(Icons.delete_outline,
+                  color: Theme.of(context).colorScheme.error),
+              title: Text('Delete',
+                  style: TextStyle(
+                      color: Theme.of(context).colorScheme.error)),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                _confirmDelete(p);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _confirmDelete(DvrProfile p) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: const Text('Delete profile?'),
+        content: Text('Remove "${p.name}"? The stored password is deleted too.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(d).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(d).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true && mounted) {
+      await context.read<ProfilesCubit>().remove(p.id);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Deleted "${p.name}"')),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return BlocProvider(
+      create: (_) => ProfilesCubit(_store)..load(),
+      child: AdaptiveShell(
+        title: 'DVR Profiles',
+        actions: [
+          BlocBuilder<ProfilesCubit, ProfilesState>(
+            builder: (context, state) {
+              if (state.profiles.isEmpty) return const SizedBox.shrink();
+              return Padding(
+                padding: const EdgeInsets.only(right: 12),
+                child: Center(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: scheme.primaryContainer,
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Text(
+                      '${state.profiles.length}',
+                      style: TextStyle(
+                        color: scheme.onPrimaryContainer,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ],
+        body: BlocBuilder<ProfilesCubit, ProfilesState>(
+          builder: (context, state) {
+            return AnimatedSwitcher(
+              duration: CctvTheme.durMed,
+              switchInCurve: CctvTheme.curveEmphasized,
+              child: _bodyFor(context, state),
             );
           },
         ),
         floatingActionButton: Builder(
-          builder: (fabContext) => FloatingActionButton(
+          builder: (fabContext) => FloatingActionButton.extended(
             onPressed: () {
               Navigator.of(fabContext).push(
-                MaterialPageRoute(
+                CctvPageRoute(
                   builder: (_) => BlocProvider.value(
                     value: fabContext.read<ProfilesCubit>(),
                     child: const ProfileFormPage(),
@@ -101,8 +172,207 @@ class _ProfileListPageState extends State<ProfileListPage> {
                 ),
               );
             },
-            child: const Icon(Icons.add),
+            icon: const Icon(Icons.add),
+            label: const Text('Add DVR'),
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _bodyFor(BuildContext context, ProfilesState state) {
+    switch (state.status) {
+      case ProfilesStatus.loading:
+        return _skeleton(context);
+      case ProfilesStatus.error:
+        return _errorState(context, state);
+      case ProfilesStatus.loaded:
+        if (state.profiles.isEmpty) return _emptyState(context);
+        return _profileList(context, state);
+    }
+  }
+
+  Widget _skeleton(BuildContext context) {
+    return ListView.separated(
+      key: const ValueKey('loading'),
+      padding: const EdgeInsets.all(16),
+      itemCount: 3,
+      separatorBuilder: (context, index) => const SizedBox(height: 12),
+      itemBuilder: (context, index) => const Card(
+        child: ListTile(
+          leading: CircleAvatar(child: Icon(Icons.dns)),
+          title: Text('Loading…'),
+          subtitle: LinearProgressIndicator(),
+        ),
+      ),
+    );
+  }
+
+  Widget _errorState(BuildContext context, ProfilesState state) {
+    final scheme = Theme.of(context).colorScheme;
+    return Center(
+      key: const ValueKey('error'),
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Card(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.error_outline,
+                    color: scheme.error, size: 40),
+                const SizedBox(height: 12),
+                Text('Failed to load: ${state.error}'),
+                const SizedBox(height: 16),
+                FilledButton.tonalIcon(
+                  onPressed: () =>
+                      context.read<ProfilesCubit>().load(),
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Retry'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _emptyState(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Center(
+      key: const ValueKey('empty'),
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: scheme.primaryContainer,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(Icons.video_library_outlined,
+                  size: 40, color: scheme.onPrimaryContainer),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'No DVR yet',
+              style: Theme.of(context).textTheme.headlineSmall,
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Add your first Dahua / CP Plus recorder to start watching live cameras.',
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _profileList(BuildContext context, ProfilesState state) {
+    final scheme = Theme.of(context).colorScheme;
+    return ListView.separated(
+      key: const ValueKey('list'),
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 88),
+      itemCount: state.profiles.length,
+      separatorBuilder: (context, index) => const SizedBox(height: 12),
+      itemBuilder: (context, i) {
+        final p = state.profiles[i];
+        return _ProfileCard(
+          profile: p,
+          autofocus: i == 0,
+          accent: scheme.primary,
+          onOpen: () => _openProfile(p),
+          onMore: () => _showActions(p),
+        );
+      },
+    );
+  }
+}
+
+class _ProfileCard extends StatefulWidget {
+  final DvrProfile profile;
+  final bool autofocus;
+  final Color accent;
+  final VoidCallback onOpen;
+  final VoidCallback onMore;
+
+  const _ProfileCard({
+    required this.profile,
+    required this.autofocus,
+    required this.accent,
+    required this.onOpen,
+    required this.onMore,
+  });
+
+  @override
+  State<_ProfileCard> createState() => _ProfileCardState();
+}
+
+class _ProfileCardState extends State<_ProfileCard> {
+  bool _focused = false;
+  final _node = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    _node.addListener(() {
+      if (mounted) setState(() => _focused = _node.hasFocus);
+    });
+  }
+
+  @override
+  void dispose() {
+    _node.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return AnimatedScale(
+      scale: _focused ? CctvTheme.focusScale : 1.0,
+      duration: CctvTheme.durShort,
+      curve: CctvTheme.curveEmphasized,
+      child: Card(
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: BorderSide(
+            color: _focused ? CctvTheme.focusColor : Colors.white10,
+            width: _focused ? 2 : 1,
+          ),
+        ),
+        child: ListTile(
+          autofocus: widget.autofocus,
+          focusNode: _node,
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          leading: CircleAvatar(
+            backgroundColor: scheme.primaryContainer,
+            foregroundColor: scheme.onPrimaryContainer,
+            child: const Icon(Icons.dns),
+          ),
+          title: Text(widget.profile.name,
+              style: const TextStyle(fontWeight: FontWeight.w600)),
+          subtitle: Text(
+            '${widget.profile.host}:${widget.profile.rtspPort} • '
+            '${widget.profile.username} • '
+            '${widget.profile.channelCount}ch',
+          ),
+          trailing: IconButton(
+            icon: const Icon(Icons.more_vert),
+            tooltip: 'Profile actions',
+            onPressed: widget.onMore,
+          ),
+          onTap: () {
+            _node.requestFocus();
+            widget.onOpen();
+          },
+          onLongPress: widget.onMore,
         ),
       ),
     );

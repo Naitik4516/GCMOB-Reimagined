@@ -2,16 +2,24 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
 import '../../../core/rtsp/mpv_options.dart';
+import '../../../core/rtsp/rtsp_concurrency.dart';
 
 /// One low-latency RTSP player. Grid tiles use [openSub] (muted,
 /// `subtype=1`); fullscreen uses [openMain] (audio on, `subtype=0`).
 ///
-/// TCP + `nobuffer`/`low_delay` flags are applied via the native libmpv
-/// handle BEFORE `open()` so they take effect on the next load.
+/// Two load-path rules live here, both learned the hard way:
+///
+/// * Load-critical mpv flags (`rtsp-transport=tcp`, `nobuffer`, …) are
+///   awaited inside [ensureFlags] BEFORE every `open()`. Firing them
+///   unawaited from the constructor races the `loadlist` command, so some
+///   tiles silently fell back to UDP and stalled on Wi-Fi.
+/// * Every `open()` goes through [RtspOpener]: at most 3 concurrent
+///   handshakes, or a full grid DDoSes the DVR and nothing loads.
 class MediaKitRTSPController {
   late final Player player;
   late final VideoController videoController;
   int _retries = 0;
+  bool _flagsApplied = false;
 
   MediaKitRTSPController({String hwdec = 'auto-safe', bool muted = true}) {
     player = Player(
@@ -31,7 +39,6 @@ class MediaKitRTSPController {
         enableHardwareAcceleration: true,
       ),
     );
-    _applyLowLatencyFlags();
     if (muted) {
       player.setVolume(0.0);
     }
@@ -49,7 +56,11 @@ class MediaKitRTSPController {
     }
   }
 
-  Future<void> _applyLowLatencyFlags() async {
+  /// Applies load-critical mpv flags, awaited BEFORE every `open()`.
+  /// Idempotent per controller; each property set is best-effort.
+  Future<void> ensureFlags() async {
+    if (_flagsApplied) return;
+    _flagsApplied = true;
     for (final opt in kLowLatencyMpvOptions) {
       await _setMpv(opt.key, opt.value);
     }
@@ -60,7 +71,10 @@ class MediaKitRTSPController {
     _retries = 0;
     await player.setVolume(0.0);
     await player.setAudioTrack(AudioTrack.no());
-    await player.open(Media(rtspUrl), play: true);
+    await RtspOpener.run(() async {
+      await ensureFlags();
+      await player.open(Media(rtspUrl), play: true);
+    });
   }
 
   /// Open a high-res main-stream (fullscreen). Audio on by default.
@@ -69,7 +83,10 @@ class MediaKitRTSPController {
 
   /// Open any single-stream URL (fullscreen SD/HD switching).
   Future<void> openSingle(String rtspUrl, {bool withAudio = true}) async {
-    await player.open(Media(rtspUrl), play: true);
+    await RtspOpener.run(() async {
+      await ensureFlags();
+      await player.open(Media(rtspUrl), play: true);
+    });
     if (withAudio) {
       await player.setAudioTrack(AudioTrack.auto());
       await player.setVolume(100.0);
@@ -84,7 +101,10 @@ class MediaKitRTSPController {
     _retries++;
     final secs = (_retries * 2).clamp(2, 10);
     await Future<void>.delayed(Duration(seconds: secs));
-    await player.open(Media(rtspUrl), play: true);
+    await RtspOpener.run(() async {
+      await ensureFlags();
+      await player.open(Media(rtspUrl), play: true);
+    });
   }
 
   Future<void> dispose() async {
