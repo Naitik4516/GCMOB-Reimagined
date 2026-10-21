@@ -100,8 +100,17 @@ install(CODE "
 
 set(INSTALL_BUNDLE_DATA_DIR "${CMAKE_INSTALL_PREFIX}/data")
 set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}/lib")
+set(INSTALL_SHARE_DIR "${CMAKE_INSTALL_PREFIX}/share")
 
 install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}"
+  COMPONENT Runtime)
+
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/assets/com.ns.gcmob_reimagined.desktop"
+  DESTINATION "${INSTALL_SHARE_DIR}/applications"
+  COMPONENT Runtime)
+install(FILES
+  "${CMAKE_CURRENT_SOURCE_DIR}/assets/icons/hicolor/256x256/apps/com.ns.gcmob_reimagined.png"
+  DESTINATION "${INSTALL_SHARE_DIR}/icons/hicolor/256x256/apps"
   COMPONENT Runtime)
 
 install(FILES "${FLUTTER_ICU_DATA_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"

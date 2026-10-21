@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=GCMOB Reimagined
+Comment=CCTV viewer for Dahua and CP Plus DVR/NVR devices
+Exec=gcmob_reimagined
+Icon=com.ns.gcmob_reimagined
+Terminal=false
+Type=Application
+Categories=AudioVideo;Security;Network;
+StartupWMClass=com.ns.gcmob_reimagined
