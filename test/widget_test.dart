@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -10,6 +11,7 @@ import 'package:gcmob_reimagined/features/live/bloc/grid_cubit.dart';
 import 'package:gcmob_reimagined/features/live/ui/camera_grid_widget.dart'
     show findTileIndex;
 import 'package:gcmob_reimagined/features/profiles/data/profile_store.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 GridCubit testGrid({
   int gridSize = 9,
@@ -72,14 +74,25 @@ void main() {
     ]);
   });
 
-  test('markFailed sinks tile behind working tiles, markRecovered lifts it',
-      () {
+  test('restores persisted order + layout across restarts', () async {
+    SharedPreferences.setMockInitialValues({
+      'ch_order_test': jsonEncode([4, 1, 3, 2]),
+      'grid_size': 9,
+    });
     final grid = testGrid(gridSize: 4, channelCount: 4);
-    grid.markFailed(2);
-    grid.markFailed(1);
-    expect(grid.state.visibleChannels, [3, 4, 2, 1]);
-    grid.markRecovered(2);
-    expect(grid.state.visibleChannels, [2, 3, 4, 1]);
+    await grid.restore();
+    expect(grid.state.order, [4, 1, 3, 2]);
+    expect(grid.state.visibleChannels, [4, 1, 3, 2]);
+    expect(grid.state.gridSize, 9);
+  });
+
+  test('invalid persisted order is ignored', () async {
+    SharedPreferences.setMockInitialValues({
+      'ch_order_test': jsonEncode([9, 9, 9, 9]),
+    });
+    final grid = testGrid(gridSize: 4, channelCount: 4);
+    await grid.restore();
+    expect(grid.state.order, [1, 2, 3, 4]);
   });
 
   test('rowCount fits partial pages without scrolling', () {

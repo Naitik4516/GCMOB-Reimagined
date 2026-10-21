@@ -25,6 +25,8 @@ class AppFullscreen {
     try {
       if (isDesktopDevice) {
         await windowManager.ensureInitialized();
+        // Floor the window so controls never crush on tiny resizes.
+        await windowManager.setMinimumSize(const Size(428, 444));
         if (useCustomChrome) {
           // Transparent backdrop so the window itself can have rounded
           // corners (drawn by CctvApp). Windows-only: transparency does

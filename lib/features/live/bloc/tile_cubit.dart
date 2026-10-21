@@ -53,16 +53,16 @@ class TileState extends Equatable {
 ///   muted); grid tiles play the muted SD sub-stream.
 /// * Failure policy: if sized frames are not observed within
 ///   [connectTimeout] (or a mid-stream error arrives), the tile goes to
-///   `error` and reports via [onFailed] so the grid can sink it behind
-///   working tiles. No automatic reconnect is attempted — [retry] is
-///   strictly user-initiated and reports via [onRecovered] on success.
+///   `error` and stays in its slot — the tile shows a retry overlay and
+///   nothing is reordered. No automatic reconnect is attempted; [retry]
+///   is strictly user-initiated. [onFailed] only lets the spotlight view
+///   react to a dead visible layer (never reorders grid tiles).
 class TileCubit extends Cubit<TileState> {
   final DvrProfile profile;
   final String password;
   final MediaKitRTSPController controller;
   final bool highRes;
   final void Function(int channel)? onFailed;
-  final void Function(int channel)? onRecovered;
   final Duration connectTimeout;
   final Duration startDelay;
 
@@ -86,7 +86,6 @@ class TileCubit extends Cubit<TileState> {
     this.highRes = false,
     bool startMuted = true,
     this.onFailed,
-    this.onRecovered,
     this.connectTimeout = const Duration(seconds: 15),
     // Staggers first opens across the grid (set from the tile's slot
     // index). Nine simultaneous mpv + MediaCodec bring-ups overwhelm
@@ -199,10 +198,7 @@ class TileCubit extends Cubit<TileState> {
       _playingGate!.complete();
     }
     if (state.conn == TileConn.playing) return;
-    final wasDown = state.conn == TileConn.error ||
-        state.conn == TileConn.reconnecting;
     emit(state.copyWith(conn: TileConn.playing));
-    if (wasDown) onRecovered?.call(state.channel);
   }
 
   /// Opens the stream and waits for sized frames, else throws.

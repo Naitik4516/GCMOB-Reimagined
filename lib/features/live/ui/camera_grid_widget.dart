@@ -14,9 +14,8 @@ import 'camera_tile_widget.dart';
 
 /// Maps a tile [Key] back to its slot index in [channels], so
 /// [GridView.findChildIndexCallback] can MOVE tiles instead of recreating
-/// them when sink/reorder reshuffles the order. Without this, every
-/// reshuffle disposes shifted tiles and their working streams reconnect —
-/// one failure avalanches across the whole grid.
+/// them when the order changes. Without this, every reshuffle disposes
+/// shifted tiles and their working streams reconnect.
 ///
 /// Keys look like `tile_<profileId>_<channel>_hd|sd`; the profile id may
 /// itself contain underscores, so the channel is parsed from the end.
@@ -35,6 +34,20 @@ int? findTileIndex(Key key, List<int> channels) {
   return idx >= 0 ? idx : null;
 }
 
+/// Failure routing shared by grid tiles and spotlight layers. Reads live
+/// grid state at call time, so moved-in cubits (whose constructor
+/// callbacks are frozen) still behave: grid tiles never move — the tile
+/// itself shows its retry overlay — while in single view a dead visible
+/// layer exits to grid (except an SD base dying under a pending HD
+/// takeover, which holds position).
+void routeTileFailure(BuildContext context, bool hd) {
+  final grid = context.read<GridCubit>();
+  if (!grid.state.spotlight) return;
+  if (hd || !grid.state.singleHd) {
+    grid.unfocus();
+  }
+}
+
 /// Adaptive grid (1x1 / 2x2 / 3x3) with TV D-Pad focus traversal.
 ///
 /// * Never scrolls: tile aspect ratio is derived from the viewport so the
@@ -46,7 +59,8 @@ int? findTileIndex(Key key, List<int> channels) {
 /// * Zoom works on every tile; a zoomed tile pans instead of reorder-drag.
 /// * [immersive] (phone landscape): page flings + long-press reorder, no
 ///   immediate drag (it would eat the fling).
-/// * Failed tiles sink behind working ones via [GridCubit.markFailed].
+/// * Failed tiles keep their slot: only the tile itself shows its retry
+///   overlay, the layout is never reshuffled by stream health.
 /// * Reorder (persists per profile): drag-and-drop, desktop right-click
 ///   channel picker, TV hold-OK to grab + OK to drop.
 class CameraGridWidget extends StatefulWidget {
@@ -67,8 +81,12 @@ class CameraGridWidget extends StatefulWidget {
 
 class _CameraGridWidgetState extends State<CameraGridWidget> {
   /// Focus nodes keyed by channel (not slot) so focus follows a channel
-  /// across sink/reorder reshuffles instead of jumping to a new tile.
+  /// across reorders instead of jumping to a new tile.
   final Map<int, FocusNode> _nodes = {};
+
+  /// Dummy nodes for background layers: present so no tile is ever
+  /// nodeless, never focused (hidden layers leave traversal).
+  final Map<int, FocusNode> _bgNodes = {};
   int? _grabbed;
 
   /// Channels currently zoomed past 1x. Their drag gesture pans the
@@ -110,12 +128,17 @@ class _CameraGridWidgetState extends State<CameraGridWidget> {
       n.dispose();
     }
     _nodes.clear();
+    for (final n in _bgNodes.values) {
+      n.dispose();
+    }
+    _bgNodes.clear();
     super.dispose();
   }
 
   void _syncNodes(Iterable<int> channels) {
     for (final c in channels) {
       _nodes.putIfAbsent(c, () => FocusNode());
+      _bgNodes.putIfAbsent(c, () => FocusNode(debugLabel: 'bg_$c'));
     }
   }
 
@@ -146,7 +169,9 @@ class _CameraGridWidgetState extends State<CameraGridWidget> {
     tileContext.read<GridCubit>().unfocus();
   }
 
-  void _onGrab(int channel) {
+  void _onGrab(BuildContext tileContext, int channel) {
+    // Nowhere to drop in 1x1: leave the gestures to zoom/pan/tap.
+    if (tileContext.read<GridCubit>().state.gridSize == 1) return;
     _buzz(HapticFeedback.selectionClick());
     setState(() => _grabbed = _grabbed == channel ? null : channel);
   }
@@ -160,7 +185,7 @@ class _CameraGridWidgetState extends State<CameraGridWidget> {
   Future<void> _pickChannel(
       BuildContext tileContext, int current, Offset at) async {
     final grid = tileContext.read<GridCubit>();
-    final eff = grid.state.effectiveOrder;
+    final eff = grid.state.order;
     final choice = await showMenu<int>(
       context: tileContext,
       position: RelativeRect.fromLTRB(at.dx, at.dy, at.dx + 1, at.dy + 1),
@@ -252,9 +277,9 @@ class _CameraGridWidgetState extends State<CameraGridWidget> {
                   }
                   Widget view = GridView.builder(
                     // findChildIndexCallback is load-bearing: without it a
-                    // sink/reorder reshuffle recreates every shifted tile
-                    // (and reconnects its working stream). With it, tiles
-                    // move slots with their players intact.
+                    // reorder recreates every shifted tile (and reconnects
+                    // its working stream). With it, tiles move slots with
+                    // their players intact.
                     findChildIndexCallback: (key) =>
                         findTileIndex(key, channels),
                     physics: const NeverScrollableScrollPhysics(),
@@ -268,140 +293,78 @@ class _CameraGridWidgetState extends State<CameraGridWidget> {
                     itemCount: channels.length,
                     itemBuilder: (context, i) {
                       final ch = channels[i];
-                      // 1x1 tiles play HD (audio on); grids stay on SD.
-                      // The quality flag is part of the key so toggling
-                      // SD/HD remounts the tile and reopens the stream.
-                      final hd = grid.gridSize == 1 && grid.singleHd;
+                      // Dual-layer assembly. The SD provider sits DIRECTLY
+                      // under the grid with a quality-independent key, so
+                      // its cubit (decoder + session) survives spotlight,
+                      // mode and quality transitions — entering single view
+                      // keeps the playing picture while HD loads. The HD
+                      // provider nests below and mounts fresh on demand.
                       return BlocProvider(
-                        key: ValueKey(
-                            'tile_${widget.profile.id}_${ch}_${hd ? 'hd' : 'sd'}'),
+                        key: ValueKey('tile_${widget.profile.id}_${ch}_sd'),
                         create: (tileContext) => TileCubit(
                           profile: widget.profile,
                           password: widget.password,
                           channel: ch,
                           controller: MediaKitRTSPController(),
-                          highRes: hd,
-                          startMuted: !hd,
+                          highRes: false,
+                          startMuted: true,
                           // Slot stagger: weak SoCs cannot bring up 9
                           // decoders in the same instant (see TileCubit).
                           startDelay:
                               Duration(milliseconds: 250 * i),
                           onFailed: (c) =>
-                              tileContext.read<GridCubit>().markFailed(c),
-                          onRecovered: (c) =>
-                              tileContext.read<GridCubit>().markRecovered(c),
+                              routeTileFailure(tileContext, false),
                         )..start(),
                         child: Builder(
                           builder: (tileContext) {
-                            final cubit = tileContext.read<TileCubit>();
-                            Widget buildTile({required bool dropCandidate}) =>
-                                CameraTileWidget(
+                            final sdCubit = tileContext.read<TileCubit>();
+                            // HD wanted in every 1x1 view (manual single +
+                            // spotlight single-camera).
+                            final hdWanted = grid.gridSize == 1 &&
+                                grid.singleHd;
+                            Widget frame(TileCubit? hd) => _TileFrame(
+                                  channel: ch,
+                                  sd: sdCubit,
+                                  hd: hd,
                                   focusNode: _nodes[ch]!,
-                                  videoController:
-                                      cubit.controller.videoController,
-                                  label: 'CH $ch',
-                                  highRes: hd,
-                                  zoomable: true,
-                                  showFocus: grid.gridSize != 1,
+                                  bgNode: _bgNodes[ch]!,
                                   grabbed: _grabbed == ch,
-                                  dropCandidate: dropCandidate,
-                                  onSelect: () => _onTileTap(tileContext, ch),
-                                  onGrab: () => _onGrab(ch),
+                                  showFocus: grid.gridSize != 1,
+                                  reorder: grid.gridSize != 1 &&
+                                      !_zoomed.contains(ch),
+                                  longPressDrag: widget.immersive,
+                                  spotlight: grid.spotlight,
+                                  onSelect: () =>
+                                      _onTileTap(tileContext, ch),
+                                  onGrab: () =>
+                                      _onGrab(tileContext, ch),
                                   onEscape: () =>
                                       _onEscape(tileContext),
                                   onZoomChanged: (z) =>
                                       _onZoomChanged(ch, z),
                                   onPickChannel: (at) =>
                                       _pickChannel(tileContext, ch, at),
+                                  onSwap: (from, to) =>
+                                      _onSwap(tileContext, from, to),
                                 );
-                            Widget buildFeedback() => MouseRegion(
-                                  cursor: SystemMouseCursors.grabbing,
-                                  child: Material(
-                                    elevation: 6,
-                                    borderRadius: BorderRadius.circular(
-                                        CctvTheme.tileRadius),
-                                    color: CctvTheme.surfaceHigh
-                                        .withValues(alpha: 0.95),
-                                    child: Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                          horizontal: 24, vertical: 16),
-                                      child: Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          const Icon(
-                                              Icons.open_with,
-                                              color: Colors.lightBlueAccent,
-                                              size: 18),
-                                          const SizedBox(width: 8),
-                                          Text(
-                                            'CH $ch',
-                                            style: const TextStyle(
-                                                color: Colors.white,
-                                                fontSize: 18,
-                                                fontWeight:
-                                                    FontWeight.w600),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ),
-                                );
-                            Widget buildPlaceholder() => Opacity(
-                                  opacity: 0.35,
-                                  child: Container(
-                                    decoration: BoxDecoration(
-                                      border: Border.all(
-                                          color: Colors.white24),
-                                      borderRadius: BorderRadius.circular(
-                                          CctvTheme.tileRadius),
-                                    ),
-                                    child: Center(
-                                      child: Text(
-                                        'CH $ch',
-                                        style: const TextStyle(
-                                            color: Colors.white38),
-                                      ),
-                                    ),
-                                  ),
-                                );
-                            Widget withTarget() => DragTarget<int>(
-                                  onWillAcceptWithDetails: (d) =>
-                                      d.data != ch,
-                                  onAcceptWithDetails: (d) =>
-                                      _onSwap(tileContext, d.data, ch),
-                                  builder: (_, candidate, _) => buildTile(
-                                      dropCandidate:
-                                          candidate.isNotEmpty),
-                                );
-                            // Zoomed tiles pan instead of reorder-drag: a
-                            // drag gesture cannot do both.
-                            if (_zoomed.contains(ch)) return withTarget();
-                            // Immersive pages turn on fling, so reorder
-                            // waits for a long-press there — an immediate
-                            // drag would eat the fling and swap by accident.
-                            if (widget.immersive) {
-                              return LongPressDraggable<int>(
-                                data: ch,
-                                maxSimultaneousDrags: 1,
-                                feedback: buildFeedback(),
-                                childWhenDragging: buildPlaceholder(),
-                                onDragStarted: () =>
-                                    _buzz(HapticFeedback.lightImpact()),
-                                child: withTarget(),
-                              );
-                            }
-                            // Immediate (slop-based) drag: a click-drag swaps
-                            // without the 500ms hold a LongPressDraggable
-                            // needs, which reads as "broken" with a mouse.
-                            // Plain clicks still land on the tile's onTap.
-                            return Draggable<int>(
-                              data: ch,
-                              maxSimultaneousDrags: 1,
-                              feedback: buildFeedback(),
-                              childWhenDragging: buildPlaceholder(),
-                              onDragStarted: () =>
-                                  _buzz(HapticFeedback.lightImpact()),
-                              child: withTarget(),
+                            if (!hdWanted) return frame(null);
+                            return BlocProvider(
+                              key: ValueKey(
+                                  'tile_${widget.profile.id}_${ch}_hd'),
+                              create: (hdContext) => TileCubit(
+                                profile: widget.profile,
+                                password: widget.password,
+                                channel: ch,
+                                controller: MediaKitRTSPController(),
+                                highRes: true,
+                                startMuted: false,
+                                onFailed: (c) =>
+                                    routeTileFailure(hdContext, true),
+                              )..start(),
+                              child: Builder(
+                                builder: (hdContext) =>
+                                    frame(hdContext.read<TileCubit>()),
+                              ),
                             );
                           },
                         ),
@@ -434,5 +397,214 @@ class _CameraGridWidgetState extends State<CameraGridWidget> {
         ),
       ),
     );
+  }
+}
+
+/// One grid slot: SD base layer + HD takeover layer, drag wrappers and
+/// focus routing.
+///
+/// Player-owning providers live ABOVE this widget with fixed keys, so it
+/// may remount freely on mode/quality changes without touching decoders.
+/// Focus follows the visible layer ([focusNode]); the hidden layer gets
+/// [bgNode] so no tile is ever nodeless. A flip of the visible layer
+/// re-requests focus post-frame so keys never go dead mid-spotlight.
+class _TileFrame extends StatefulWidget {
+  final int channel;
+  final TileCubit sd;
+  final TileCubit? hd;
+  final FocusNode focusNode;
+  final FocusNode bgNode;
+  final bool grabbed;
+  final bool showFocus;
+  final bool reorder;
+  final bool longPressDrag;
+  final bool spotlight;
+  final VoidCallback onSelect;
+  final VoidCallback onGrab;
+  final VoidCallback onEscape;
+  final void Function(bool zoomed) onZoomChanged;
+  final void Function(Offset globalPosition) onPickChannel;
+  final void Function(int from, int to) onSwap;
+
+  const _TileFrame({
+    required this.channel,
+    required this.sd,
+    required this.hd,
+    required this.focusNode,
+    required this.bgNode,
+    required this.grabbed,
+    required this.showFocus,
+    required this.reorder,
+    required this.longPressDrag,
+    required this.spotlight,
+    required this.onSelect,
+    required this.onGrab,
+    required this.onEscape,
+    required this.onZoomChanged,
+    required this.onPickChannel,
+    required this.onSwap,
+  });
+
+  @override
+  State<_TileFrame> createState() => _TileFrameState();
+}
+
+class _TileFrameState extends State<_TileFrame> {
+  bool? _lastPrimaryIsSd;
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.hd == null) {
+      return _dressed(dropCandidate: false, primaryIsSd: true);
+    }
+    return BlocProvider.value(
+      value: widget.hd!,
+      child: BlocBuilder<TileCubit, TileState>(
+        buildWhen: (prev, next) =>
+            (prev.conn == TileConn.playing) !=
+            (next.conn == TileConn.playing),
+        builder: (_, hs) => _dressed(
+          dropCandidate: false,
+          primaryIsSd: hs.conn != TileConn.playing,
+        ),
+      ),
+    );
+  }
+
+  Widget _dressed({required bool dropCandidate, required bool primaryIsSd}) {
+    // Keep key events alive across the SD/HD swap: the shared node moves
+    // to the visible tile. Skipped on first mount (null) so grid pages
+    // keep their first-tile autofocus instead of landing on the last tile.
+    if (_lastPrimaryIsSd != null && primaryIsSd != _lastPrimaryIsSd) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) widget.focusNode.requestFocus();
+      });
+    }
+    _lastPrimaryIsSd = primaryIsSd;
+    Widget tile({
+      required TileCubit cubit,
+      required FocusNode node,
+      required String label,
+      required bool highRes,
+      required bool drop,
+    }) =>
+        CameraTileWidget(
+          focusNode: node,
+          videoController: cubit.controller.videoController,
+          label: label,
+          highRes: highRes,
+          zoomable: true,
+          showFocus: widget.showFocus,
+          grabbed: widget.grabbed,
+          dropCandidate: drop,
+          onSelect: widget.onSelect,
+          onGrab: widget.onGrab,
+          onEscape: widget.onEscape,
+          onZoomChanged: widget.onZoomChanged,
+          onPickChannel: widget.onPickChannel,
+        );
+    Widget stack({required bool drop}) => Stack(
+          fit: StackFit.expand,
+          children: [
+            Visibility(
+              visible: primaryIsSd,
+              maintainState: true,
+              child: BlocProvider.value(
+                value: widget.sd,
+                child: tile(
+                  cubit: widget.sd,
+                  node: primaryIsSd ? widget.focusNode : widget.bgNode,
+                  label: 'CH ${widget.channel}',
+                  highRes: false,
+                  drop: drop,
+                ),
+              ),
+            ),
+            if (widget.hd != null)
+              Visibility(
+                visible: !primaryIsSd,
+                maintainState: true,
+                child: tile(
+                  cubit: widget.hd!,
+                  node: primaryIsSd ? widget.bgNode : widget.focusNode,
+                  label: 'CH ${widget.channel} · HD',
+                  highRes: true,
+                  drop: drop,
+                ),
+              ),
+          ],
+        );
+    if (!widget.reorder) return stack(drop: false);
+    Widget target() => DragTarget<int>(
+          onWillAcceptWithDetails: (d) => d.data != widget.channel,
+          onAcceptWithDetails: (d) =>
+              widget.onSwap(d.data, widget.channel),
+          builder: (_, candidate, _) =>
+              stack(drop: candidate.isNotEmpty),
+        );
+    Widget feedback() => MouseRegion(
+          cursor: SystemMouseCursors.grabbing,
+          child: Material(
+            elevation: 6,
+            borderRadius:
+                BorderRadius.circular(CctvTheme.tileRadius),
+            color: CctvTheme.surfaceHigh.withValues(alpha: 0.95),
+            child: Padding(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.open_with,
+                      color: Colors.lightBlueAccent, size: 18),
+                  const SizedBox(width: 8),
+                  Text(
+                    'CH ${widget.channel}',
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+    Widget placeholder() => Opacity(
+          opacity: 0.35,
+          child: Container(
+            decoration: BoxDecoration(
+              border: Border.all(color: Colors.white24),
+              borderRadius:
+                  BorderRadius.circular(CctvTheme.tileRadius),
+            ),
+            child: Center(
+              child: Text(
+                'CH ${widget.channel}',
+                style: const TextStyle(color: Colors.white38),
+              ),
+            ),
+          ),
+        );
+    void onDragStarted() =>
+        _CameraGridWidgetState._buzz(HapticFeedback.lightImpact());
+    final draggable = widget.longPressDrag
+        ? LongPressDraggable<int>(
+            data: widget.channel,
+            maxSimultaneousDrags: 1,
+            feedback: feedback(),
+            childWhenDragging: placeholder(),
+            onDragStarted: onDragStarted,
+            child: target(),
+          )
+        : Draggable<int>(
+            data: widget.channel,
+            maxSimultaneousDrags: 1,
+            feedback: feedback(),
+            childWhenDragging: placeholder(),
+            onDragStarted: onDragStarted,
+            child: target(),
+          );
+    return draggable;
   }
 }

@@ -108,7 +108,7 @@ class _LivePageState extends State<LivePage> {
         profileId: widget.profile.id,
         gridSize: 4,
         channelCount: widget.profile.channelCount,
-      )..loadOrder(),
+      )..restore(),
       child: Builder(
         builder: (context) {
           final scheme = Theme.of(context).colorScheme;
@@ -151,21 +151,18 @@ class _LivePageState extends State<LivePage> {
               const _FullscreenToggle(),
             ],
             hideChrome: _immersive,
-            body: _immersive
-                ? _ImmersiveBody(
+            body: desktop
+                ? _DesktopBody(
+                    profile: widget.profile,
+                    password: widget.password)
+                : _PhoneBody(
                     profile: widget.profile,
                     password: widget.password,
+                    immersive: _immersive,
                     controlsVisible: _controlsVisible,
                     onTap: _showImmersiveControls,
                     onBack: () => _immersiveBack(context),
-                  )
-                : desktop
-                    ? _DesktopBody(
-                        profile: widget.profile,
-                        password: widget.password)
-                    : CameraGridWidget(
-                        profile: widget.profile,
-                        password: widget.password),
+                  ),
             bottomBar:
                 (desktop || _immersive) ? null : const _LiveControlBar(),
           );
@@ -265,18 +262,26 @@ class _DesktopGridActions extends StatelessWidget {
   }
 }
 
-/// Phone-landscape immersive body: full-bleed grid (fling pages, tap
-/// reveals the floating bar + back button, auto-hidden after 5s).
-class _ImmersiveBody extends StatelessWidget {
+/// Phone body: the SAME [CameraGridWidget] element in every mode.
+///
+/// Shape stability is load-bearing: rotation toggles immersive chrome,
+/// but the grid must never remount — remounting disposes every
+/// TileCubit and all streams reload (visible in logcat as a wave of
+/// MediaCodec teardowns). Immersive layers are appended AFTER the grid
+/// so child 0 is untouched; the tap layer only listens for taps and
+/// never competes with drag/scale gestures.
+class _PhoneBody extends StatelessWidget {
   final DvrProfile profile;
   final String password;
+  final bool immersive;
   final bool controlsVisible;
   final VoidCallback onTap;
   final VoidCallback onBack;
 
-  const _ImmersiveBody({
+  const _PhoneBody({
     required this.profile,
     required this.password,
+    required this.immersive,
     required this.controlsVisible,
     required this.onTap,
     required this.onBack,
@@ -284,35 +289,41 @@ class _ImmersiveBody extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      behavior: HitTestBehavior.translucent,
-      // Nested tile taps still fire alongside this (tap recognizers
-      // don't exclude each other), so tiles keep working underneath.
-      onTap: onTap,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          CameraGridWidget(
-              profile: profile, password: password, immersive: true),
-          if (controlsVisible) ...[
-            Positioned(
-              top: 12,
-              left: 12,
-              child: _FloatBtn(
-                icon: Icons.arrow_back,
-                tooltip: 'Back',
-                onPressed: onBack,
-              ),
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        CameraGridWidget(
+            profile: profile,
+            password: password,
+            immersive: immersive),
+        // Tap-to-reveal layer: nested tile taps still fire alongside
+        // this (tap recognizers don't exclude each other).
+        if (immersive)
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onTap: onTap,
+              child: const SizedBox.expand(),
             ),
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 16,
-              child: Center(child: _ImmersiveBar(onBack: onBack)),
+          ),
+        if (immersive && controlsVisible) ...[
+          Positioned(
+            top: 12,
+            left: 12,
+            child: _FloatBtn(
+              icon: Icons.arrow_back,
+              tooltip: 'Back',
+              onPressed: onBack,
             ),
-          ],
+          ),
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 16,
+            child: Center(child: _ImmersiveBar(onBack: onBack)),
+          ),
         ],
-      ),
+      ],
     );
   }
 }

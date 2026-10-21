@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:equatable/equatable.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
@@ -5,9 +7,9 @@ import '../../profiles/data/profile_store.dart';
 
 /// Grid layout: 1, 4, or 9 visible tiles + page index for >9 channels.
 ///
-/// * [order] — user-arranged display order (persisted per profile).
-/// * [sunk] — channels that failed this session, shown after all working
-///   tiles, in order of failure. Session-only, never persisted.
+/// * [order] — user-arranged display order (persisted per profile). Tile
+///   positions NEVER change on their own: a stream failing or recovering
+///   leaves the slot exactly where the user put it.
 /// * [spotlight] — a double-clicked/OK tile is shown alone (1x1, HD);
 ///   [returnSize]/[returnPage] restore the previous layout on exit.
 /// * [singleHd] — 1x1 tiles play the HD main-stream (audio on); off to
@@ -17,7 +19,6 @@ class GridState extends Equatable {
   final int page;
   final int channelCount;
   final List<int> order;
-  final List<int> sunk;
   final bool spotlight;
   final int returnSize;
   final int returnPage;
@@ -28,30 +29,20 @@ class GridState extends Equatable {
     this.page = 0,
     required this.channelCount,
     required this.order,
-    this.sunk = const [],
     this.spotlight = false,
     this.returnSize = 4,
     this.returnPage = 0,
     this.singleHd = true,
   });
 
-  /// Working tiles first (in user order), failed tiles last.
-  List<int> get effectiveOrder => [
-        for (final c in order)
-          if (!sunk.contains(c)) c,
-        for (final c in sunk)
-          if (order.contains(c)) c,
-      ];
-
   int get pageCount =>
       channelCount <= gridSize ? 1 : (channelCount / gridSize).ceil();
 
   /// 1-based channels visible on the current page.
   List<int> get visibleChannels {
-    final eff = effectiveOrder;
     final start = page * gridSize;
-    final end = (start + gridSize).clamp(0, eff.length);
-    return eff.sublist(start.clamp(0, eff.length), end);
+    final end = (start + gridSize).clamp(0, order.length);
+    return order.sublist(start.clamp(0, order.length), end);
   }
 
   int get crossAxisCount => gridSize == 1 ? 1 : gridSize <= 4 ? 2 : 3;
@@ -64,7 +55,6 @@ class GridState extends Equatable {
     int? page,
     int? channelCount,
     List<int>? order,
-    List<int>? sunk,
     bool? spotlight,
     int? returnSize,
     int? returnPage,
@@ -75,7 +65,6 @@ class GridState extends Equatable {
         page: page ?? this.page,
         channelCount: channelCount ?? this.channelCount,
         order: order ?? this.order,
-        sunk: sunk ?? this.sunk,
         spotlight: spotlight ?? this.spotlight,
         returnSize: returnSize ?? this.returnSize,
         returnPage: returnPage ?? this.returnPage,
@@ -88,7 +77,6 @@ class GridState extends Equatable {
         page,
         channelCount,
         order,
-        sunk,
         spotlight,
         returnSize,
         returnPage,
@@ -100,6 +88,12 @@ class GridCubit extends Cubit<GridState> {
   final ProfileStore _store;
   final String _profileId;
   final Future<void> Function(List<int> order)? _saveOrderOverride;
+
+  /// True once the user has reordered; late [restore] must not clobber it.
+  bool _userReordered = false;
+
+  /// True once the user picked a layout; late [restore] must not clobber it.
+  bool _userSetLayout = false;
 
   GridCubit({
     required ProfileStore store,
@@ -119,25 +113,53 @@ class GridCubit extends Cubit<GridState> {
           order: order ?? [for (var c = 1; c <= channelCount; c++) c],
         ));
 
-  /// Loads persisted user order (if any). Call once after creation.
-  Future<void> loadOrder() async {
-    final saved = await _store.loadChannelOrder(_profileId, state.channelCount);
-    if (!isClosed && saved != null) {
-      emit(state.copyWith(order: saved, page: 0));
+  /// Restores the persisted channel order + layout for this profile.
+  /// Call once after creation. Missing/invalid data leaves defaults;
+  /// storage errors are ignored so the live view always opens.
+  Future<void> restore() async {
+    List<int>? saved;
+    int? size;
+    try {
+      saved = await _store.loadChannelOrder(_profileId, state.channelCount);
+      size = await _store.loadGridSize();
+    } catch (_) {
+      return;
     }
+    if (isClosed) return;
+    var next = state;
+    // A reorder that landed while storage was still reading wins.
+    if (saved != null && !_userReordered) {
+      next = next.copyWith(order: saved, page: 0);
+    }
+    if (size == 1 || size == 4 || size == 9) {
+      if (!_userSetLayout) next = next.copyWith(gridSize: size);
+    }
+    if (next != state) emit(next);
   }
 
   void setGridSize(int size) {
     assert(size == 1 || size == 4 || size == 9);
+    _userSetLayout = true;
     // An explicit layout pick always leaves spotlight mode.
     emit(state.copyWith(gridSize: size, page: 0, spotlight: false));
+    unawaited(_persistGridSize(size));
+  }
+
+  /// Layout is global (not per profile like the channel order). Failures
+  /// are swallowed: storage is absent in widget tests.
+  Future<void> _persistGridSize(int size) async {
+    try {
+      await _store.saveGridSize(size);
+    } catch (_) {
+      // Best-effort.
+    }
   }
 
   /// Double-click / OK on a tile: show it alone (1x1), remembering the
   /// layout + page to restore on exit.
   void focusChannel(int channel) {
     if (isClosed) return;
-    final idx = state.effectiveOrder.indexOf(channel);
+    final idx = state.order.indexOf(channel);
     if (idx < 0) return;
     emit(state.copyWith(
       gridSize: 1,
@@ -180,6 +202,7 @@ class GridCubit extends Cubit<GridState> {
   /// Swaps two channels in the user order and persists it.
   Future<void> swapChannels(int a, int b) async {
     if (a == b || isClosed) return;
+    _userReordered = true;
     final order = [...state.order];
     final ia = order.indexOf(a);
     final ib = order.indexOf(b);
@@ -192,19 +215,5 @@ class GridCubit extends Cubit<GridState> {
     } else {
       await _store.saveChannelOrder(_profileId, order);
     }
-  }
-
-  /// Sinks a failed channel behind all working tiles. No retry is
-  /// attempted afterwards — recovery is strictly user-initiated.
-  void markFailed(int channel) {
-    if (isClosed || state.sunk.contains(channel)) return;
-    emit(state.copyWith(sunk: [...state.sunk, channel]));
-  }
-
-  /// Lifts a channel back into user order after a successful manual retry.
-  void markRecovered(int channel) {
-    if (isClosed || !state.sunk.contains(channel)) return;
-    emit(state.copyWith(
-        sunk: state.sunk.where((c) => c != channel).toList()));
   }
 }

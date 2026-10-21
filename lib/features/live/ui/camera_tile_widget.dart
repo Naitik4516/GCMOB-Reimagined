@@ -71,6 +71,27 @@ class CameraTileWidget extends StatefulWidget {
   State<CameraTileWidget> createState() => _CameraTileWidgetState();
 }
 
+/// Shared wheel-zoom math (single tiles + the spotlight stack):
+/// cursor-anchored scale of [controller], clamped to `1.0..maxScale`.
+/// Pinch/pan stay native to [InteractiveViewer] — the viewer maps wheel
+/// to pan, so the wheel needs this manual matrix.
+void applyWheelZoom(
+    TransformationController controller, PointerSignalEvent e, double maxScale) {
+  if (e is! PointerScrollEvent || e.scrollDelta.dy == 0) return;
+  final current = controller.value.getMaxScaleOnAxis();
+  final next =
+      (current * (e.scrollDelta.dy < 0 ? 1.15 : 1 / 1.15)).clamp(1.0, maxScale);
+  if (next == current) return;
+  final f = next / current;
+  final pos = e.localPosition;
+  final anchor = Matrix4.identity()
+    ..translateByDouble(pos.dx, pos.dy, 0.0, 1.0)
+    ..scaleByDouble(f, f, f, 1.0)
+    ..translateByDouble(-pos.dx, -pos.dy, 0.0, 1.0);
+  controller.value = anchor.multiplied(controller.value);
+  if (next <= 1.0) controller.value = Matrix4.identity();
+}
+
 class _CameraTileWidgetState extends State<CameraTileWidget> {
   static const _grabHold = Duration(milliseconds: 600);
   static const _maxZoom = 6.0;
@@ -186,24 +207,9 @@ class _CameraTileWidgetState extends State<CameraTileWidget> {
     }
   }
 
-  /// Mouse-wheel zoom anchored at the cursor. Pinch/pan are handled
-  /// natively by [InteractiveViewer]; the wheel needs a manual matrix
-  /// because the viewer maps wheel to pan instead of zoom.
-  void _onWheel(PointerSignalEvent e) {
-    if (e is! PointerScrollEvent || e.scrollDelta.dy == 0) return;
-    final current = _zoom.value.getMaxScaleOnAxis();
-    final next =
-        (current * (e.scrollDelta.dy < 0 ? 1.15 : 1 / 1.15)).clamp(1.0, _maxZoom);
-    if (next == current) return;
-    final f = next / current;
-    final pos = e.localPosition;
-    final anchor = Matrix4.identity()
-      ..translateByDouble(pos.dx, pos.dy, 0.0, 1.0)
-      ..scaleByDouble(f, f, f, 1.0)
-      ..translateByDouble(-pos.dx, -pos.dy, 0.0, 1.0);
-    _zoom.value = anchor.multiplied(_zoom.value);
-    if (next <= 1.0) _zoom.value = Matrix4.identity();
-  }
+  /// Mouse-wheel zoom anchored at the cursor (see [applyWheelZoom]).
+  void _onWheel(PointerSignalEvent e) =>
+      applyWheelZoom(_zoom, e, _maxZoom);
 
   Widget _video() {
     final video = Video(

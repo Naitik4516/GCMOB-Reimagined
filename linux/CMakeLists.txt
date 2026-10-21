@@ -7,7 +7,17 @@ project(runner LANGUAGES CXX)
 set(BINARY_NAME "gcmob_reimagined")
 # The unique GTK application identifier for this application. See:
 # https://wiki.gnome.org/HowDoI/ChooseApplicationID
-set(APPLICATION_ID "com.example.gcmob_reimagined")
+set(APPLICATION_ID "com.ns.gcmob_reimagined")
+
+# Use mold for Linux release/profile links. Windows uses the MSVC linker and
+# Android uses the linker supplied by its NDK, so neither is changed here.
+option(GCMOB_USE_MOLD "Use mold as the Linux linker" ON)
+if(GCMOB_USE_MOLD)
+  find_program(MOLD_LINKER mold REQUIRED)
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fuse-ld=mold")
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fuse-ld=mold")
+  set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -fuse-ld=mold")
+endif()
 
 # Explicitly opt in to modern CMake behaviors to avoid warnings with recent
 # versions of CMake.
