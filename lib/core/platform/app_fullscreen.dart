@@ -1,14 +1,17 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'app_chrome.dart';
 import 'is_tv.dart';
 
 /// App-level fullscreen: borderless window on desktop via window_manager,
 /// immersive sticky system bars on Android. F11 toggles it from anywhere
 /// (see `CctvApp`); [LivePage] also exposes a toggle button.
+///
+/// Fullscreen hides OS chrome only; the in-app title bar/AppBar remains so
+/// layout, quality, paging and exit controls stay reachable.
 ///
 /// [isFullscreen] notifies listeners so toggle icons stay in sync.
 class AppFullscreen {
@@ -47,11 +50,9 @@ class AppFullscreen {
         final prefs = await SharedPreferences.getInstance();
         final full = prefs.getBool(_prefKey) ?? false;
         isFullscreen.value = full;
-        if (full) {
-          await SystemChrome.setEnabledSystemUIMode(
-              SystemUiMode.immersiveSticky);
-        }
-        // Otherwise leave system UI alone: no forced fullscreen on launch.
+        // Reconciler also honors any current page immersion. At launch the
+        // page flag is false, so this is just the saved app choice.
+        await AppChrome.reconcile();
       }
     } catch (e) {
       // Window controls unavailable; run windowed.
@@ -64,15 +65,14 @@ class AppFullscreen {
     try {
       if (isDesktopDevice) {
         await windowManager.setFullScreen(next);
+        isFullscreen.value = next;
       } else if (!kIsWeb &&
           defaultTargetPlatform == TargetPlatform.android) {
-        await SystemChrome.setEnabledSystemUIMode(next
-            ? SystemUiMode.immersiveSticky
-            : SystemUiMode.edgeToEdge);
+        isFullscreen.value = next;
+        await AppChrome.reconcile();
       } else {
         return;
       }
-      isFullscreen.value = next;
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_prefKey, next);
     } catch (e) {

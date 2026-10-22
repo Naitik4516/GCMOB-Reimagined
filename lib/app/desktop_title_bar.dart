@@ -5,6 +5,20 @@ import 'package:window_manager/window_manager.dart';
 
 import 'theme.dart';
 
+/// Shared by the title-bar double-click and the maximize button. The
+/// [WindowListener] on [_WindowButtonsState] keeps the icon in sync.
+Future<void> _toggleWindowMaximize() async {
+  try {
+    if (await windowManager.isMaximized()) {
+      await windowManager.unmaximize();
+    } else {
+      await windowManager.maximize();
+    }
+  } catch (_) {
+    // No window controls on this platform; ignore.
+  }
+}
+
 /// Desktop window title bar (Windows-only): a draggable region merging
 /// the page title + actions with native window buttons. Rendered by
 /// [AdaptiveShell] instead of [AppBar] where [useCustomChrome] holds;
@@ -42,7 +56,7 @@ class DesktopTitleBar extends StatelessWidget {
               behavior: HitTestBehavior.translucent,
               onPanStart: (_) =>
                   unawaited(windowManager.startDragging()),
-              onDoubleTap: _toggleMaximize,
+              onDoubleTap: _toggleWindowMaximize,
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 8),
                 child: Row(
@@ -72,18 +86,6 @@ class DesktopTitleBar extends StatelessWidget {
       ),
     );
   }
-
-  Future<void> _toggleMaximize() async {
-    try {
-      if (await windowManager.isMaximized()) {
-        await windowManager.unmaximize();
-      } else {
-        await windowManager.maximize();
-      }
-    } catch (_) {
-      // No window controls on this platform; ignore.
-    }
-  }
 }
 
 class _WindowButtons extends StatefulWidget {
@@ -93,12 +95,50 @@ class _WindowButtons extends StatefulWidget {
   State<_WindowButtons> createState() => _WindowButtonsState();
 }
 
-class _WindowButtonsState extends State<_WindowButtons> {
+class _WindowButtonsState extends State<_WindowButtons> with WindowListener {
   bool _maximized = false;
 
   @override
   void initState() {
     super.initState();
+    try {
+      windowManager.addListener(this);
+    } catch (_) {
+      // Window controls unavailable; icon stays at its last value.
+    }
+    _refresh();
+  }
+
+  @override
+  void dispose() {
+    try {
+      windowManager.removeListener(this);
+    } catch (_) {}
+    super.dispose();
+  }
+
+  @override
+  void onWindowMaximize() {
+    if (mounted) setState(() => _maximized = true);
+  }
+
+  @override
+  void onWindowUnmaximize() {
+    if (mounted) setState(() => _maximized = false);
+  }
+
+  @override
+  void onWindowRestore() {
+    _refresh();
+  }
+
+  @override
+  void onWindowEnterFullScreen() {
+    _refresh();
+  }
+
+  @override
+  void onWindowLeaveFullScreen() {
     _refresh();
   }
 
@@ -115,20 +155,6 @@ class _WindowButtonsState extends State<_WindowButtons> {
     try {
       await windowManager.minimize();
     } catch (_) {}
-  }
-
-  Future<void> _toggleMaximize() async {
-    try {
-      if (await windowManager.isMaximized()) {
-        await windowManager.unmaximize();
-      } else {
-        await windowManager.maximize();
-      }
-    } catch (_) {
-      // Ignore.
-    } finally {
-      _refresh();
-    }
   }
 
   Future<void> _close() async {
@@ -150,7 +176,7 @@ class _WindowButtonsState extends State<_WindowButtons> {
         _WinBtn(
           icon: _maximized ? Icons.filter_none : Icons.crop_square,
           tooltip: _maximized ? 'Restore' : 'Maximize',
-          onPressed: _toggleMaximize,
+          onPressed: _toggleWindowMaximize,
         ),
         _WinBtn(
           icon: Icons.close,
@@ -185,22 +211,26 @@ class _WinBtnState extends State<_WinBtn> {
 
   @override
   Widget build(BuildContext context) {
-    return MouseRegion(
-      onEnter: (_) => setState(() => _hover = true),
-      onExit: (_) => setState(() => _hover = false),
-      child: GestureDetector(
-        onTap: widget.onPressed,
-        child: Container(
-          width: 46,
-          height: 44,
-          color: _hover
-              ? widget.danger
-                  ? const Color(0xFFE81123)
-                  : Colors.white10
-              : Colors.transparent,
-          child: Tooltip(
-            message: widget.tooltip,
-            child: Icon(widget.icon, size: 18),
+    return Semantics(
+      button: true,
+      label: widget.tooltip,
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hover = true),
+        onExit: (_) => setState(() => _hover = false),
+        child: GestureDetector(
+          onTap: widget.onPressed,
+          child: Container(
+            width: 46,
+            height: 44,
+            color: _hover
+                ? widget.danger
+                    ? const Color(0xFFE81123)
+                    : Colors.white10
+                : Colors.transparent,
+            child: Tooltip(
+              message: widget.tooltip,
+              child: Icon(widget.icon, size: 18),
+            ),
           ),
         ),
       ),
