@@ -1,12 +1,29 @@
 # GCMOB Reimagined
 
-CCTV viewer for Dahua and CP Plus DVR/NVR devices over RTSP.
+Low-latency CCTV viewer for Dahua and CP Plus DVR/NVR devices over RTSP.
+Browse a 1/4/9-camera wall, open any camera in a spotlight single view, and
+drive the app with a TV remote, keyboard, or mouse.
+
+## Requirements
+
+- Flutter with Dart SDK `^3.13.5` and the toolchain for your target:
+  Android SDK/NDK, Visual Studio for Windows, or the Linux desktop toolchain.
+- Linux runtime: `libsecret-1-0` (used by `flutter_secure_storage` to keep DVR
+  passwords out of SharedPreferences).
+
+## Development
+
+```sh
+flutter pub get
+flutter analyze
+flutter test
+flutter run -d <device-id>
+```
+
+Do not run `dart format` across the repository; the code predates the current
+tall-style formatter.
 
 ## Production builds
-
-The production application ID is `com.ns.gcmob_reimagined`. The Android
-manifest includes both the standard launcher and Android TV Leanback launcher,
-so the same release APK can be installed on phones and Android TV devices.
 
 ### Android signing
 
@@ -19,11 +36,12 @@ keyAlias=gcmob
 keyPassword=...
 ```
 
-Do not commit this file or the keystore. Build phone/TV APKs with:
-
 ```sh
 flutter build apk --release
 ```
+
+Release builds fail by design when `android/key.properties` is missing. Never
+commit that file or the keystore.
 
 ### Desktop builds
 
@@ -35,8 +53,8 @@ flutter build linux --release
 flutter build windows --release
 ```
 
-Windows uses the platform MSVC linker; Android uses the linker supplied by
-the Android NDK. The Linux bundle is written to
-`build/linux/x64/release/bundle/`, and the Windows bundle is written to
-`build/windows/x64/runner/Release/`.
+## Plans
+
+Implementation plans for the ongoing review work live in
+[`plans/`](plans/README.md).
 
