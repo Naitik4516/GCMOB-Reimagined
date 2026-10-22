@@ -20,24 +20,59 @@ class ProfileListPage extends StatefulWidget {
 
 class _ProfileListPageState extends State<ProfileListPage> {
   final _store = ProfileStore();
+  // Owned by the State, not created inside build(): this context is an
+  // ancestor of the BlocProvider, so `context.read` from here (sheet
+  // callbacks, dialogs) would not resolve it. Callers use `_cubit` directly.
+  late final ProfilesCubit _cubit = ProfilesCubit(_store)..load();
+  bool _opening = false;
+
+  @override
+  void dispose() {
+    _cubit.close();
+    super.dispose();
+  }
 
   Future<void> _openProfile(DvrProfile p) async {
-    final pass = await _store.loadPassword(p.id);
-    if (!mounted) return;
-    if (pass == null || pass.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('No password stored — edit profile to re-enter.')),
+    if (_opening) return;
+    _opening = true;
+    try {
+      String? pass;
+      try {
+        pass = await _store.loadPassword(p.id);
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Couldn\'t read the stored password — is a system keyring available?',
+              ),
+            ),
+          );
+        }
+        return;
+      }
+      if (!mounted) return;
+      if (pass == null || pass.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('No password stored — edit profile to re-enter.')),
+        );
+        return;
+      }
+      try {
+        await _store.saveLastProfile(p.id);
+      } catch (_) {
+        // A missing "last profile" hint must not block opening live view.
+      }
+      if (!mounted) return;
+      await Navigator.of(context).push(
+        CctvPageRoute(
+          builder: (_) => LivePage(profile: p, password: pass!),
+        ),
       );
-      return;
+    } finally {
+      _opening = false;
     }
-    await _store.saveLastProfile(p.id);
-    if (!mounted) return;
-    Navigator.of(context).push(
-      CctvPageRoute(
-        builder: (_) => LivePage(profile: p, password: pass),
-      ),
-    );
   }
 
   void _showActions(DvrProfile p) {
@@ -65,7 +100,7 @@ class _ProfileListPageState extends State<ProfileListPage> {
                 Navigator.of(context).push(
                   CctvPageRoute(
                     builder: (_) => BlocProvider.value(
-                      value: context.read<ProfilesCubit>(),
+                      value: _cubit,
                       child: ProfileFormPage(existing: p),
                     ),
                   ),
@@ -108,11 +143,19 @@ class _ProfileListPageState extends State<ProfileListPage> {
       ),
     );
     if (ok == true && mounted) {
-      await context.read<ProfilesCubit>().remove(p.id);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Deleted "${p.name}"')),
-        );
+      try {
+        await _cubit.remove(p.id);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Deleted "${p.name}"')),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Couldn\'t delete: $e')),
+          );
+        }
       }
     }
   }
@@ -120,8 +163,8 @@ class _ProfileListPageState extends State<ProfileListPage> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return BlocProvider(
-      create: (_) => ProfilesCubit(_store)..load(),
+    return BlocProvider.value(
+      value: _cubit,
       child: AdaptiveShell(
         title: 'DVR Profiles',
         actions: [
@@ -160,21 +203,19 @@ class _ProfileListPageState extends State<ProfileListPage> {
             );
           },
         ),
-        floatingActionButton: Builder(
-          builder: (fabContext) => FloatingActionButton.extended(
-            onPressed: () {
-              Navigator.of(fabContext).push(
-                CctvPageRoute(
-                  builder: (_) => BlocProvider.value(
-                    value: fabContext.read<ProfilesCubit>(),
-                    child: const ProfileFormPage(),
-                  ),
+        floatingActionButton: _FocusOutlineFab(
+          onPressed: () {
+            Navigator.of(context).push(
+              CctvPageRoute(
+                builder: (_) => BlocProvider.value(
+                  value: _cubit,
+                  child: const ProfileFormPage(),
                 ),
-              );
-            },
-            icon: const Icon(Icons.add),
-            label: const Text('Add DVR'),
-          ),
+              ),
+            );
+          },
+          icon: const Icon(Icons.add),
+          label: const Text('Add DVR'),
         ),
       ),
     );
@@ -290,6 +331,62 @@ class _ProfileListPageState extends State<ProfileListPage> {
           onMore: () => _showActions(p),
         );
       },
+    );
+  }
+}
+
+/// "Add DVR" FAB with the shared amber focus outline, so D-Pad users can see
+/// which control owns focus on TV. Material's default focus overlay is too
+/// faint over the FAB's primary container colour.
+class _FocusOutlineFab extends StatefulWidget {
+  final VoidCallback onPressed;
+  final Widget icon;
+  final Widget label;
+
+  const _FocusOutlineFab({
+    required this.onPressed,
+    required this.icon,
+    required this.label,
+  });
+
+  @override
+  State<_FocusOutlineFab> createState() => _FocusOutlineFabState();
+}
+
+class _FocusOutlineFabState extends State<_FocusOutlineFab> {
+  final _node = FocusNode();
+  bool _focused = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _node.addListener(() {
+      if (mounted) setState(() => _focused = _node.hasFocus);
+    });
+  }
+
+  @override
+  void dispose() {
+    _node.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Same radius as floatingActionButtonTheme in CctvTheme.dark().
+    const radius = BorderRadius.all(Radius.circular(16));
+    return FloatingActionButton.extended(
+      focusNode: _node,
+      onPressed: widget.onPressed,
+      shape: RoundedRectangleBorder(
+        borderRadius: radius,
+        side: BorderSide(
+          color: _focused ? CctvTheme.focusColor : Colors.transparent,
+          width: _focused ? 2 : 1,
+        ),
+      ),
+      icon: widget.icon,
+      label: widget.label,
     );
   }
 }

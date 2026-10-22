@@ -12,6 +12,14 @@ import '../bloc/tile_cubit.dart';
 import '../player/media_kit_rtsp_controller.dart';
 import 'camera_tile_widget.dart';
 
+/// Park the hidden SD player once HD is confirmed playing.
+///
+/// Entering 1x1 keeps the SD picture visible until the HD layer reports
+/// its first frames; only then is the SD session stopped. Set this to
+/// `false` to keep both sessions alive (the old behavior) if measurements
+/// show the reopen on exit is too slow for a given DVR.
+const bool kSuspendSdUnderHd = true;
+
 /// Maps a tile [Key] back to its slot index in [channels], so
 /// [GridView.findChildIndexCallback] can MOVE tiles instead of recreating
 /// them when the order changes. Without this, every reshuffle disposes
@@ -42,7 +50,7 @@ int? findTileIndex(Key key, List<int> channels) {
 /// takeover, which holds position).
 void routeTileFailure(BuildContext context, bool hd) {
   final grid = context.read<GridCubit>();
-  if (!grid.state.spotlight) return;
+  if (!grid.state.isFocused) return;
   if (hd || !grid.state.singleHd) {
     grid.unfocus();
   }
@@ -153,7 +161,7 @@ class _CameraGridWidgetState extends State<CameraGridWidget> {
       return;
     }
     final grid = tileContext.read<GridCubit>();
-    if (grid.state.spotlight) {
+    if (grid.state.isFocused) {
       grid.unfocus();
     } else {
       grid.focusChannel(channel);
@@ -206,15 +214,16 @@ class _CameraGridWidgetState extends State<CameraGridWidget> {
 
   @override
   Widget build(BuildContext context) {
-    // Rebuild only the pop guard when spotlight toggles; tiles rebuild
-    // via the inner BlocBuilder.
-    final spotlight =
-        context.select<GridCubit, bool>((c) => c.state.spotlight);
+    // Rebuild only the pop guard when focus toggles; tiles rebuild via
+    // the inner BlocBuilder.
+    final focused =
+        context.select<GridCubit, bool>((c) => c.state.isFocused);
     return BlocListener<GridCubit, GridState>(
       listenWhen: (prev, next) =>
           prev.page != next.page ||
           prev.gridSize != next.gridSize ||
-          prev.spotlight != next.spotlight,
+          prev.focusedChannel != next.focusedChannel ||
+          prev.isFocused != next.isFocused,
       listener: (listenerContext, _) {
         // A new page has no focused tile yet; land on its first tile so
         // D-Pad navigation keeps working without touching the screen.
@@ -229,7 +238,7 @@ class _CameraGridWidgetState extends State<CameraGridWidget> {
         });
       },
       child: PopScope(
-        canPop: _grabbed == null && !spotlight,
+        canPop: _grabbed == null && !focused,
         onPopInvokedWithResult: (didPop, _) {
           if (didPop) return;
           // System Back cancels a grab first, then leaves single view.
@@ -301,20 +310,25 @@ class _CameraGridWidgetState extends State<CameraGridWidget> {
                       // provider nests below and mounts fresh on demand.
                       return BlocProvider(
                         key: ValueKey('tile_${widget.profile.id}_${ch}_sd'),
-                        create: (tileContext) => TileCubit(
-                          profile: widget.profile,
-                          password: widget.password,
-                          channel: ch,
-                          controller: MediaKitRTSPController(),
-                          highRes: false,
-                          startMuted: true,
-                          // Slot stagger: weak SoCs cannot bring up 9
-                          // decoders in the same instant (see TileCubit).
-                          startDelay:
-                              Duration(milliseconds: 250 * i),
-                          onFailed: (c) =>
-                              routeTileFailure(tileContext, false),
-                        )..start(),
+                        create: (tileContext) {
+                          final controller =
+                              MediaKitRTSPController(debugLabel: 'ch$ch sd');
+                          return TileCubit(
+                            profile: widget.profile,
+                            password: widget.password,
+                            channel: ch,
+                            player: controller,
+                            videoController: controller.videoController,
+                            highRes: false,
+                            startMuted: true,
+                            // Slot stagger: weak SoCs cannot bring up 9
+                            // decoders in the same instant (see TileCubit).
+                            startDelay:
+                                Duration(milliseconds: 250 * i),
+                            onFailed: (c) =>
+                                routeTileFailure(tileContext, false),
+                          )..start();
+                        },
                         child: Builder(
                           builder: (tileContext) {
                             final sdCubit = tileContext.read<TileCubit>();
@@ -333,7 +347,6 @@ class _CameraGridWidgetState extends State<CameraGridWidget> {
                                   reorder: grid.gridSize != 1 &&
                                       !_zoomed.contains(ch),
                                   longPressDrag: widget.immersive,
-                                  spotlight: grid.spotlight,
                                   onSelect: () =>
                                       _onTileTap(tileContext, ch),
                                   onGrab: () =>
@@ -351,16 +364,23 @@ class _CameraGridWidgetState extends State<CameraGridWidget> {
                             return BlocProvider(
                               key: ValueKey(
                                   'tile_${widget.profile.id}_${ch}_hd'),
-                              create: (hdContext) => TileCubit(
-                                profile: widget.profile,
-                                password: widget.password,
-                                channel: ch,
-                                controller: MediaKitRTSPController(),
-                                highRes: true,
-                                startMuted: false,
-                                onFailed: (c) =>
-                                    routeTileFailure(hdContext, true),
-                              )..start(),
+                              create: (hdContext) {
+                                final controller =
+                                    MediaKitRTSPController(
+                                        debugLabel: 'ch$ch hd');
+                                return TileCubit(
+                                  profile: widget.profile,
+                                  password: widget.password,
+                                  channel: ch,
+                                  player: controller,
+                                  videoController:
+                                      controller.videoController,
+                                  highRes: true,
+                                  startMuted: false,
+                                  onFailed: (c) =>
+                                      routeTileFailure(hdContext, true),
+                                )..start();
+                              },
                               child: Builder(
                                 builder: (hdContext) =>
                                     frame(hdContext.read<TileCubit>()),
@@ -418,7 +438,6 @@ class _TileFrame extends StatefulWidget {
   final bool showFocus;
   final bool reorder;
   final bool longPressDrag;
-  final bool spotlight;
   final VoidCallback onSelect;
   final VoidCallback onGrab;
   final VoidCallback onEscape;
@@ -436,7 +455,6 @@ class _TileFrame extends StatefulWidget {
     required this.showFocus,
     required this.reorder,
     required this.longPressDrag,
-    required this.spotlight,
     required this.onSelect,
     required this.onGrab,
     required this.onEscape,
@@ -451,6 +469,16 @@ class _TileFrame extends StatefulWidget {
 
 class _TileFrameState extends State<_TileFrame> {
   bool? _lastPrimaryIsSd;
+
+  /// The hidden SD cubit has been parked (or a park is scheduled).
+  bool _sdSuspended = false;
+
+  @override
+  void didUpdateWidget(covariant _TileFrame oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // A different SD owner is a different session; never resume the old one.
+    if (oldWidget.sd != widget.sd) _sdSuspended = false;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -471,6 +499,31 @@ class _TileFrameState extends State<_TileFrame> {
     );
   }
 
+  /// Parks the SD layer only after HD is visibly primary, and brings it
+  /// back for every fallback (SD toggle, HD failure, exit focus). The
+  /// flag flips before the post-frame callback so repeated builds cannot
+  /// schedule duplicate suspend/resume calls.
+  void _syncSdSuspension(bool primaryIsSd) {
+    if (!kSuspendSdUnderHd) return;
+    if (primaryIsSd) {
+      if (!_sdSuspended) return;
+      _sdSuspended = false;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(widget.sd.resume());
+      });
+      return;
+    }
+    if (_sdSuspended || widget.hd == null) return;
+    if (widget.hd!.state.conn != TileConn.playing) return;
+    _sdSuspended = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      // HD may have dropped before this frame; the next build resumes.
+      if (widget.hd?.state.conn != TileConn.playing) return;
+      unawaited(widget.sd.suspend());
+    });
+  }
+
   Widget _dressed({required bool dropCandidate, required bool primaryIsSd}) {
     // Keep key events alive across the SD/HD swap: the shared node moves
     // to the visible tile. Skipped on first mount (null) so grid pages
@@ -481,6 +534,7 @@ class _TileFrameState extends State<_TileFrame> {
       });
     }
     _lastPrimaryIsSd = primaryIsSd;
+    _syncSdSuspension(primaryIsSd);
     Widget tile({
       required TileCubit cubit,
       required FocusNode node,
@@ -490,7 +544,7 @@ class _TileFrameState extends State<_TileFrame> {
     }) =>
         CameraTileWidget(
           focusNode: node,
-          videoController: cubit.controller.videoController,
+          videoController: cubit.videoController!,
           label: label,
           highRes: highRes,
           zoomable: true,
@@ -501,7 +555,9 @@ class _TileFrameState extends State<_TileFrame> {
           onGrab: widget.onGrab,
           onEscape: widget.onEscape,
           onZoomChanged: widget.onZoomChanged,
-          onPickChannel: widget.onPickChannel,
+          // No channel picker while reorder is unavailable (1x1 / zoomed):
+          // swapping in a lone tile was a confusing half-reorder.
+          onPickChannel: widget.reorder ? widget.onPickChannel : null,
         );
     Widget stack({required bool drop}) => Stack(
           fit: StackFit.expand,

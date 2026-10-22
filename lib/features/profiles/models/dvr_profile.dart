@@ -45,14 +45,45 @@ class DvrProfile extends Equatable {
         'channelCount': channelCount,
       };
 
-  factory DvrProfile.fromJson(Map<String, dynamic> json) => DvrProfile(
-        id: json['id'] as String,
-        name: json['name'] as String,
-        host: json['host'] as String,
-        rtspPort: (json['rtspPort'] as num).toInt(),
-        username: json['username'] as String,
-        channelCount: (json['channelCount'] as num).toInt(),
-      );
+  /// Decodes one persisted record.
+  ///
+  /// Throws [FormatException] for records missing required fields or carrying
+  /// invalid ports/channel counts. [ProfileStore.loadProfiles] catches it and
+  /// skips just that record instead of bricking the whole list.
+  factory DvrProfile.fromJson(Map<String, dynamic> json) {
+    String requireString(String key) {
+      final value = json[key];
+      if (value is! String || value.trim().isEmpty) {
+        throw FormatException('Invalid or missing "$key"');
+      }
+      return value;
+    }
+
+    int requireInt(String key) {
+      final value = json[key];
+      if (value is! num) {
+        throw FormatException('Invalid or missing "$key"');
+      }
+      return value.toInt();
+    }
+
+    final rtspPort = requireInt('rtspPort');
+    if (rtspPort < 1 || rtspPort > 65535) {
+      throw FormatException('rtspPort out of range: $rtspPort');
+    }
+    final channelCount = requireInt('channelCount');
+    if (channelCount < 1) {
+      throw const FormatException('channelCount must be positive');
+    }
+    return DvrProfile(
+      id: requireString('id'),
+      name: requireString('name'),
+      host: requireString('host'),
+      rtspPort: rtspPort,
+      username: requireString('username'),
+      channelCount: channelCount,
+    );
+  }
 
   @override
   List<Object?> get props => [id, name, host, rtspPort, username, channelCount];

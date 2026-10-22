@@ -1,18 +1,18 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../../app/adaptive_shell.dart';
 import '../../../app/theme.dart';
+import '../../../core/platform/app_chrome.dart';
 import '../../../core/platform/app_fullscreen.dart';
 import '../../../core/platform/is_tv.dart';
 import '../../profiles/data/profile_store.dart';
 import '../../profiles/models/dvr_profile.dart';
 import '../bloc/grid_cubit.dart';
 import 'camera_grid_widget.dart';
-import 'shortcuts_help.dart';
+import 'live_controls.dart';
 
 /// Live view: [CameraGridWidget] + controls.
 ///
@@ -52,6 +52,12 @@ class _LivePageState extends State<LivePage> {
   @override
   void dispose() {
     _hideTimer?.cancel();
+    if (_immersive) {
+      // Popping/Back while landscape must restore the system bars for the
+      // profile list too; the route's state is gone before the next frame.
+      _immersive = false;
+      unawaited(AppChrome.setPageImmersive(false));
+    }
     super.dispose();
   }
 
@@ -67,16 +73,13 @@ class _LivePageState extends State<LivePage> {
         _immersive = false;
         _controlsVisible = false;
         _hideTimer?.cancel();
-        // A manual F11 fullscreen stays immersive; rotation-driven
-        // immersion exits back to normal bars.
-        if (!AppFullscreen.isFullscreen.value) {
-          SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-        }
+        // The reconciler keeps immersion if app fullscreen is still on.
+        unawaited(AppChrome.setPageImmersive(false));
       }
     } else if (_seenPortrait && !_immersive && !isDesktopDevice) {
       _immersive = true;
       _showImmersiveControls();
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      unawaited(AppChrome.setPageImmersive(true));
     }
   }
 
@@ -93,7 +96,7 @@ class _LivePageState extends State<LivePage> {
 
   void _immersiveBack(BuildContext gridContext) {
     final grid = gridContext.read<GridCubit>();
-    if (grid.state.spotlight) {
+    if (grid.state.isFocused) {
       grid.unfocus();
     } else {
       Navigator.of(gridContext).pop();
@@ -147,7 +150,8 @@ class _LivePageState extends State<LivePage> {
               ),
             ),
             actions: [
-              if (desktop) const _DesktopGridActions(),
+              if (desktop)
+                const LiveControls(showShortcuts: true),
               const _FullscreenToggle(),
             ],
             hideChrome: _immersive,
@@ -188,80 +192,6 @@ class _FullscreenToggle extends StatelessWidget {
   }
 }
 
-/// Desktop title-bar controls: layout picker, SD/HD (1x1), shortcuts.
-/// Shortcuts help lives here only — phones/TV have no shortcut button.
-class _DesktopGridActions extends StatelessWidget {
-  const _DesktopGridActions();
-
-  @override
-  Widget build(BuildContext context) {
-    return BlocBuilder<GridCubit, GridState>(
-      builder: (context, grid) {
-        final cubit = context.read<GridCubit>();
-        return Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            SegmentedButton<int>(
-              segments: const [
-                ButtonSegment(
-                  value: 1,
-                  icon: Icon(Icons.crop_square, size: 16),
-                  tooltip: '1x1 (HD)',
-                ),
-                ButtonSegment(
-                  value: 4,
-                  icon: Icon(Icons.grid_view, size: 16),
-                  tooltip: '2x2',
-                ),
-                ButtonSegment(
-                  value: 9,
-                  icon: Icon(Icons.grid_on, size: 16),
-                  tooltip: '3x3',
-                ),
-              ],
-              selected: {grid.gridSize},
-              showSelectedIcon: false,
-              style: SegmentedButton.styleFrom(
-                visualDensity: VisualDensity.compact,
-              ),
-              onSelectionChanged: (s) => cubit.setGridSize(s.first),
-            ),
-            if (grid.gridSize == 1) ...[
-              const SizedBox(width: 8),
-              SegmentedButton<bool>(
-                segments: const [
-                  ButtonSegment(
-                    value: false,
-                    label: Text('SD'),
-                    tooltip: 'Sub-stream',
-                  ),
-                  ButtonSegment(
-                    value: true,
-                    label: Text('HD'),
-                    tooltip: 'Main-stream',
-                  ),
-                ],
-                selected: {grid.singleHd},
-                showSelectedIcon: false,
-                style: SegmentedButton.styleFrom(
-                  visualDensity: VisualDensity.compact,
-                ),
-                onSelectionChanged: (s) => cubit.setSingleHd(s.first),
-              ),
-            ],
-            const SizedBox(width: 4),
-            IconButton(
-              tooltip: 'Keyboard shortcuts (F1)',
-              icon: const Icon(Icons.keyboard_outlined, size: 20),
-              onPressed: () => showShortcutsHelp(context),
-            ),
-          ],
-        );
-      },
-    );
-  }
-}
-
 /// Phone body: the SAME [CameraGridWidget] element in every mode.
 ///
 /// Shape stability is load-bearing: rotation toggles immersive chrome,
@@ -296,8 +226,10 @@ class _PhoneBody extends StatelessWidget {
             profile: profile,
             password: password,
             immersive: immersive),
-        // Tap-to-reveal layer: nested tile taps still fire alongside
-        // this (tap recognizers don't exclude each other).
+        // Tap-to-reveal layer: the translucent hit-test layer wins single
+        // taps (reveal controls). It deliberately claims no double-tap or
+        // drag gestures, so those still reach the tile. Do not assume a
+        // single tap focuses a tile while immersive controls are hidden.
         if (immersive)
           Positioned.fill(
             child: GestureDetector(
@@ -359,7 +291,7 @@ class _FloatBtn extends StatelessWidget {
 
 /// Floating translucent pager: layout picker, SD/HD (1x1), prev/next
 /// (hidden at the ends — no disabled dead-ends), plus a Grid exit while
-/// spotlighted.
+/// a channel is focused.
 class _ImmersiveBar extends StatelessWidget {
   final VoidCallback onBack;
 
@@ -367,101 +299,20 @@ class _ImmersiveBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return BlocBuilder<GridCubit, GridState>(
-      builder: (context, grid) {
-        final cubit = context.read<GridCubit>();
-        return Container(
-          padding:
-              const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.55),
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(color: Colors.white24),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              SegmentedButton<int>(
-                segments: const [
-                  ButtonSegment(
-                    value: 1,
-                    icon: Icon(Icons.crop_square, size: 16),
-                    tooltip: '1x1 (HD)',
-                  ),
-                  ButtonSegment(
-                    value: 4,
-                    icon: Icon(Icons.grid_view, size: 16),
-                    tooltip: '2x2',
-                  ),
-                  ButtonSegment(
-                    value: 9,
-                    icon: Icon(Icons.grid_on, size: 16),
-                    tooltip: '3x3',
-                  ),
-                ],
-                selected: {grid.gridSize},
-                showSelectedIcon: false,
-                style: SegmentedButton.styleFrom(
-                  visualDensity: VisualDensity.compact,
-                ),
-                onSelectionChanged: (s) => cubit.setGridSize(s.first),
-              ),
-              if (grid.gridSize == 1) ...[
-                const SizedBox(width: 8),
-                SegmentedButton<bool>(
-                  segments: const [
-                    ButtonSegment(
-                      value: false,
-                      label: Text('SD'),
-                      tooltip: 'Sub-stream',
-                    ),
-                    ButtonSegment(
-                      value: true,
-                      label: Text('HD'),
-                      tooltip: 'Main-stream',
-                    ),
-                  ],
-                  selected: {grid.singleHd},
-                  showSelectedIcon: false,
-                  style: SegmentedButton.styleFrom(
-                    visualDensity: VisualDensity.compact,
-                  ),
-                  onSelectionChanged: (s) =>
-                      cubit.setSingleHd(s.first),
-                ),
-              ],
-              const SizedBox(width: 8),
-              if (grid.page > 0)
-                IconButton(
-                  tooltip: 'Previous page',
-                  icon: const Icon(Icons.chevron_left),
-                  color: Colors.white,
-                  onPressed: () => cubit.prevPage(),
-                ),
-              Text(
-                '${grid.page + 1}/${grid.pageCount}',
-                style: const TextStyle(color: Colors.white70),
-              ),
-              if (grid.page < grid.pageCount - 1)
-                IconButton(
-                  tooltip: 'Next page',
-                  icon: const Icon(Icons.chevron_right),
-                  color: Colors.white,
-                  onPressed: () => cubit.nextPage(),
-                ),
-              if (grid.spotlight) ...[
-                const SizedBox(width: 4),
-                IconButton(
-                  tooltip: 'Back to grid',
-                  icon: const Icon(Icons.grid_view),
-                  color: Colors.white,
-                  onPressed: onBack,
-                ),
-              ],
-            ],
-          ),
-        );
-      },
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: Colors.white24),
+      ),
+      child: LiveControls(
+        showPager: true,
+        showPageLabel: true,
+        showGridExit: true,
+        onGridExit: onBack,
+        iconColor: Colors.white,
+      ),
     );
   }
 }
@@ -479,10 +330,11 @@ class _DesktopBody extends StatelessWidget {
     return BlocBuilder<GridCubit, GridState>(
       builder: (context, grid) {
         final cubit = context.read<GridCubit>();
+        final page = grid.displayPage;
         return Stack(
           children: [
             CameraGridWidget(profile: profile, password: password),
-            if (grid.pageCount > 1 && grid.page > 0)
+            if (grid.pageCount > 1 && page > 0)
               Positioned(
                 left: 12,
                 top: 0,
@@ -495,7 +347,7 @@ class _DesktopBody extends StatelessWidget {
                   ),
                 ),
               ),
-            if (grid.pageCount > 1 && grid.page < grid.pageCount - 1)
+            if (grid.pageCount > 1 && page < grid.pageCount - 1)
               Positioned(
                 right: 12,
                 top: 0,
@@ -562,82 +414,9 @@ class _LiveControlBar extends StatelessWidget {
         top: false,
         child: SingleChildScrollView(
           scrollDirection: Axis.horizontal,
-          child: BlocBuilder<GridCubit, GridState>(
-            builder: (context, grid) {
-              final cubit = context.read<GridCubit>();
-              return Row(
-                children: [
-                  SegmentedButton<int>(
-                    segments: const [
-                      ButtonSegment(
-                        value: 1,
-                        icon: Icon(Icons.crop_square, size: 16),
-                        tooltip: '1x1 (HD)',
-                      ),
-                      ButtonSegment(
-                        value: 4,
-                        icon: Icon(Icons.grid_view, size: 16),
-                        tooltip: '2x2',
-                      ),
-                      ButtonSegment(
-                        value: 9,
-                        icon: Icon(Icons.grid_on, size: 16),
-                        tooltip: '3x3',
-                      ),
-                    ],
-                    selected: {grid.gridSize},
-                    showSelectedIcon: false,
-                    style: SegmentedButton.styleFrom(
-                      visualDensity: VisualDensity.compact,
-                    ),
-                    onSelectionChanged: (s) => cubit.setGridSize(s.first),
-                  ),
-                  if (grid.gridSize == 1) ...[
-                    const SizedBox(width: 8),
-                    SegmentedButton<bool>(
-                      segments: const [
-                        ButtonSegment(
-                          value: false,
-                          label: Text('SD'),
-                          tooltip: 'Sub-stream',
-                        ),
-                        ButtonSegment(
-                          value: true,
-                          label: Text('HD'),
-                          tooltip: 'Main-stream',
-                        ),
-                      ],
-                      selected: {grid.singleHd},
-                      showSelectedIcon: false,
-                      style: SegmentedButton.styleFrom(
-                        visualDensity: VisualDensity.compact,
-                      ),
-                      onSelectionChanged: (s) =>
-                          cubit.setSingleHd(s.first),
-                    ),
-                  ],
-                  if (grid.pageCount > 1) ...[
-                    const SizedBox(width: 8),
-                    if (grid.page > 0)
-                      IconButton(
-                        tooltip: 'Previous page',
-                        icon: const Icon(Icons.chevron_left),
-                        onPressed: () => cubit.prevPage(),
-                      ),
-                    Text(
-                      '${grid.page + 1}/${grid.pageCount}',
-                      style: const TextStyle(color: Colors.white70),
-                    ),
-                    if (grid.page < grid.pageCount - 1)
-                      IconButton(
-                        tooltip: 'Next page',
-                        icon: const Icon(Icons.chevron_right),
-                        onPressed: () => cubit.nextPage(),
-                      ),
-                  ],
-                ],
-              );
-            },
+          child: const LiveControls(
+            showPager: true,
+            showPageLabel: true,
           ),
         ),
       ),

@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -20,8 +21,34 @@ class ProfileStore {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_profilesKey);
     if (raw == null || raw.isEmpty) return [];
-    final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
-    return list.map(DvrProfile.fromJson).toList();
+
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(raw);
+    } catch (e) {
+      debugPrint('ProfileStore: profiles JSON is unreadable: $e');
+      return [];
+    }
+    if (decoded is! List) {
+      debugPrint('ProfileStore: profiles JSON is not a list');
+      return [];
+    }
+
+    final profiles = <DvrProfile>[];
+    for (var i = 0; i < decoded.length; i++) {
+      final item = decoded[i];
+      if (item is! Map) {
+        debugPrint('ProfileStore: skipping non-map profile at index $i');
+        continue;
+      }
+      try {
+        profiles.add(DvrProfile.fromJson(Map<String, dynamic>.from(item)));
+      } catch (e) {
+        // One corrupt record must not hide the rest of the list.
+        debugPrint('ProfileStore: skipping invalid profile at index $i: $e');
+      }
+    }
+    return profiles;
   }
 
   Future<void> _saveProfiles(List<DvrProfile> profiles) async {
@@ -35,13 +62,24 @@ class ProfileStore {
   Future<void> upsertProfile(DvrProfile profile, String password) async {
     final profiles = await loadProfiles();
     final i = profiles.indexWhere((p) => p.id == profile.id);
+    final previous = i >= 0 ? profiles[i] : null;
     if (i >= 0) {
       profiles[i] = profile;
     } else {
       profiles.add(profile);
     }
-    await _saveProfiles(profiles);
+
+    // Password first: a failed keyring write must not leave a profile that
+    // cannot be opened. An orphaned secret after a later JSON failure is
+    // harmless and gets overwritten/deleted on the next save.
     await _secure.write(key: _passKey(profile.id), value: password);
+    await _saveProfiles(profiles);
+
+    if (previous != null && previous.channelCount != profile.channelCount) {
+      // A stale order would become valid again if the user later restores the
+      // old channel count, silently resurrecting channels that were removed.
+      await deleteChannelOrder(profile.id);
+    }
   }
 
   Future<void> deleteProfile(String id) async {
@@ -49,6 +87,11 @@ class ProfileStore {
     profiles.removeWhere((p) => p.id == id);
     await _saveProfiles(profiles);
     await _secure.delete(key: _passKey(id));
+    await deleteChannelOrder(id);
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getString(_lastProfileKey) == id) {
+      await prefs.remove(_lastProfileKey);
+    }
   }
 
   Future<String?> loadPassword(String id) => _secure.read(key: _passKey(id));
@@ -100,5 +143,10 @@ class ProfileStore {
   Future<void> saveChannelOrder(String profileId, List<int> order) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_orderKey(profileId), jsonEncode(order));
+  }
+
+  Future<void> deleteChannelOrder(String profileId) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_orderKey(profileId));
   }
 }

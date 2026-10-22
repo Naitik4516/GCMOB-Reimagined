@@ -10,6 +10,7 @@ import '../../../app/theme.dart';
 import '../bloc/grid_cubit.dart';
 import '../bloc/tile_cubit.dart';
 import 'shortcuts_help.dart';
+import 'tile_shortcuts.dart';
 
 /// Single CCTV tile: video + connection overlay + D-Pad focus glow.
 ///
@@ -96,7 +97,7 @@ class _CameraTileWidgetState extends State<CameraTileWidget> {
   static const _grabHold = Duration(milliseconds: 600);
   static const _maxZoom = 6.0;
   bool _focused = false;
-  bool _hovering = false;
+  final ValueNotifier<bool> _hover = ValueNotifier(false);
   bool _zoomed = false;
   Timer? _holdTimer;
   DateTime? _downTime;
@@ -107,12 +108,28 @@ class _CameraTileWidgetState extends State<CameraTileWidget> {
   void initState() {
     super.initState();
     widget.focusNode.addListener(_onFocus);
+    _focused = widget.focusNode.hasFocus;
     _zoom.addListener(_reportZoom);
   }
 
   @override
+  void didUpdateWidget(covariant CameraTileWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.focusNode == widget.focusNode) return;
+    // _TileFrame moves focusNode between the SD and HD layers when the
+    // visible stream flips. Re-bind here or the listener stays on the old
+    // node (leaked listener + stale _focused), and dispose removes the
+    // wrong one.
+    oldWidget.focusNode.removeListener(_onFocus);
+    widget.focusNode.addListener(_onFocus);
+    _focused = widget.focusNode.hasFocus;
+    _cancelHold();
+  }
+
+  @override
   void dispose() {
-    _holdTimer?.cancel();
+    _cancelHold();
+    _hover.dispose();
     _zoom.removeListener(_reportZoom);
     _zoom.dispose();
     widget.focusNode.removeListener(_onFocus);
@@ -127,59 +144,66 @@ class _CameraTileWidgetState extends State<CameraTileWidget> {
   }
 
   void _onFocus() {
+    if (!widget.focusNode.hasFocus) _cancelHold();
     if (mounted) setState(() => _focused = widget.focusNode.hasFocus);
   }
 
-  static bool _isConfirm(KeyEvent e) =>
-      e.logicalKey == LogicalKeyboardKey.select ||
-      e.logicalKey == LogicalKeyboardKey.enter ||
-      e.logicalKey == LogicalKeyboardKey.gameButtonA;
+  void _cancelHold() {
+    _holdTimer?.cancel();
+    _downTime = null;
+    _grabFired = false;
+  }
 
   void _onKey(KeyEvent e) {
-    if (e is KeyDownEvent) {
-      // Grid-level shortcuts, available on any focused tile.
-      if (e.logicalKey == LogicalKeyboardKey.escape) {
+    final shortcut = shortcutFor(e.logicalKey);
+    if (shortcut == null) return;
+
+    if (shortcut == TileShortcut.confirm) {
+      _onConfirmKey(e);
+      return;
+    }
+    if (e is! KeyDownEvent) return;
+
+    // Grid-level shortcuts stay available even when an overlay button
+    // (Retry, mute, …) has focus.
+    switch (shortcut) {
+      case TileShortcut.escape:
         widget.onEscape?.call();
         return;
-      }
-      if (e.logicalKey == LogicalKeyboardKey.f1) {
+      case TileShortcut.help:
         showShortcutsHelp(context);
         return;
-      }
-      final grid = context.read<GridCubit>();
-      if (e.logicalKey == LogicalKeyboardKey.digit1 ||
-          e.logicalKey == LogicalKeyboardKey.numpad1) {
-        grid.setGridSize(1);
+      case TileShortcut.layout1:
+        context.read<GridCubit>().setGridSize(1);
         return;
-      }
-      if (e.logicalKey == LogicalKeyboardKey.digit2 ||
-          e.logicalKey == LogicalKeyboardKey.numpad2) {
-        grid.setGridSize(4);
+      case TileShortcut.layout4:
+        context.read<GridCubit>().setGridSize(4);
         return;
-      }
-      if (e.logicalKey == LogicalKeyboardKey.digit3 ||
-          e.logicalKey == LogicalKeyboardKey.numpad3) {
-        grid.setGridSize(9);
+      case TileShortcut.layout9:
+        context.read<GridCubit>().setGridSize(9);
         return;
-      }
-      if (e.logicalKey == LogicalKeyboardKey.bracketLeft ||
-          e.logicalKey == LogicalKeyboardKey.pageUp ||
-          e.logicalKey == LogicalKeyboardKey.channelUp) {
-        grid.prevPage();
+      case TileShortcut.previousPage:
+        context.read<GridCubit>().prevPage();
         return;
-      }
-      if (e.logicalKey == LogicalKeyboardKey.bracketRight ||
-          e.logicalKey == LogicalKeyboardKey.pageDown ||
-          e.logicalKey == LogicalKeyboardKey.channelDown) {
-        grid.nextPage();
+      case TileShortcut.nextPage:
+        context.read<GridCubit>().nextPage();
         return;
-      }
-      if (e.logicalKey == LogicalKeyboardKey.keyM) {
+      case TileShortcut.mute:
         context.read<TileCubit>().toggleMute();
         return;
-      }
+      case TileShortcut.confirm:
+        return;
     }
-    if (!_isConfirm(e)) return;
+  }
+
+  void _onConfirmKey(KeyEvent e) {
+    // A focused overlay button owns the confirm key. Without this gate the
+    // tile's KeyboardListener also sees the bubbled event and retries/opens
+    // spotlight while the button activates.
+    if (!widget.focusNode.hasPrimaryFocus) {
+      _cancelHold();
+      return;
+    }
     if (e is KeyDownEvent) {
       // Hold = grab for TV drag-and-drop; a quick press is handled on
       // key-up so hold and tap never both fire. Held keys arrive as
@@ -254,8 +278,10 @@ class _CameraTileWidgetState extends State<CameraTileWidget> {
         // Grab cursor advertises drag-and-drop on desktop; no-op on
         // touch/TV where hover never happens.
         cursor: SystemMouseCursors.grab,
-        onEnter: (_) => setState(() => _hovering = true),
-        onExit: (_) => setState(() => _hovering = false),
+        // Hover only flips a notifier: rebuilding the whole tile here
+        // would rebuild Video + InteractiveViewer on every pointer sweep.
+        onEnter: (_) => _hover.value = true,
+        onExit: (_) => _hover.value = false,
         child: GestureDetector(
           // Single click/tap only focuses (D-Pad landing, drag start).
           // Fullscreen opens on double click (touch/mouse) or OK (TV).
@@ -353,16 +379,21 @@ class _CameraTileWidgetState extends State<CameraTileWidget> {
                           color: Colors.greenAccent),
                     ),
                   // Drag handle only when a drag would reorder: hidden
-                  // while zoomed (drags pan the picture instead).
-                  if (_hovering &&
-                      !_zoomed &&
+                  // while zoomed (drags pan the picture instead). Only
+                  // this overlay listens to hover.
+                  if (!_zoomed &&
                       !widget.grabbed &&
                       !widget.dropCandidate)
-                    const Positioned(
+                    Positioned(
                       right: 6,
                       bottom: 4,
-                      child: Icon(Icons.drag_indicator,
-                          color: Colors.white54, size: 18),
+                      child: ValueListenableBuilder<bool>(
+                        valueListenable: _hover,
+                        builder: (_, hovering, child) =>
+                            hovering ? child! : const SizedBox.shrink(),
+                        child: const Icon(Icons.drag_indicator,
+                            color: Colors.white54, size: 18),
+                      ),
                     ),
                   // HD single tiles carry audio: mute toggle lives on the
                   // tile so it stays focusable for TV remotes.
@@ -518,6 +549,13 @@ class _CameraTileWidgetState extends State<CameraTileWidget> {
             height: 28,
             child: CircularProgressIndicator(strokeWidth: 2.5),
           )),
+        );
+      case TileConn.suspended:
+        // Normally the hidden layer; black avoids a spinner that would
+        // suggest a connect is still in progress.
+        return Container(
+          key: const ValueKey('suspended'),
+          color: Colors.black,
         );
       case TileConn.playing:
         return const SizedBox.shrink(key: ValueKey('playing'));
