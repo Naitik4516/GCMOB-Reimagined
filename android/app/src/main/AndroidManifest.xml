@@ -1,8 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <uses-feature android:name="android.software.leanback" android:required="false" />
     <uses-feature android:name="android.hardware.wifi" android:required="false" />
+    <!-- flutter_secure_storage keys cannot survive an Android backup/restore. -->
     <application
+        android:allowBackup="false"
+        android:fullBackupContent="false"
         android:label="GCMOB Reimagined"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
